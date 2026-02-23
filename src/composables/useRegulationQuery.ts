@@ -1,0 +1,749 @@
+/**
+ * 规章查询 Composable
+ *
+ * 提供规章搜索和下载功能的状态管理。
+ * 下载成功后自动添加到本地 Tantivy 索引。
+ */
+
+import { ref, computed, reactive, watch } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
+import { useRegulationStore } from '@/stores/regulation'
+import { useRegulationIndex } from './useRegulationIndex'
+import type {
+  RegulationDocument,
+  RegulationSearchResult,
+  RegulationDocType,
+  RegulationValidity,
+  RegulationScanResponse,
+  RegulationSyncCompareResponse,
+} from '@/types'
+
+/** 日期筛选选项 */
+export type DateFilter = 'all' | '1day' | '7days' | '30days' | 'custom'
+
+/** 搜索状态 */
+interface RegulationSearchState {
+  /** 搜索关键词 */
+  keyword: string
+  /** 文档类型 */
+  docType: RegulationDocType
+  /** 有效性筛选 */
+  validity: RegulationValidity
+  /** 日期筛选 */
+  dateFilter: DateFilter
+  /** 自定义起始日期 */
+  startDate: string
+  /** 自定义结束日期 */
+  endDate: string
+}
+
+/** localStorage 持久化 key */
+const REGULATION_SEARCH_PREFS_KEY = 'regulation-search-prefs'
+
+/** 需要持久化的搜索偏好字段 */
+interface RegulationSearchPrefs {
+  keyword: string
+  docType: RegulationDocType
+  validity: RegulationValidity
+  dateFilter: DateFilter
+  startDate: string
+  endDate: string
+}
+
+/** 从 localStorage 加载搜索偏好 */
+function loadSearchPrefs(): Partial<RegulationSearchPrefs> {
+  try {
+    const raw = localStorage.getItem(REGULATION_SEARCH_PREFS_KEY)
+    if (raw) {
+      return JSON.parse(raw)
+    }
+  } catch (e) {
+    console.warn('[RegulationQuery] 加载搜索偏好失败:', e)
+  }
+  return {}
+}
+
+/** 保存搜索偏好到 localStorage */
+function saveSearchPrefs(prefs: RegulationSearchPrefs): void {
+  try {
+    localStorage.setItem(REGULATION_SEARCH_PREFS_KEY, JSON.stringify(prefs))
+  } catch (e) {
+    console.warn('[RegulationQuery] 保存搜索偏好失败:', e)
+  }
+}
+
+export function useRegulationQuery() {
+  const regulationStore = useRegulationStore()
+  const regulationIndex = useRegulationIndex()
+
+  // ============================================
+  // State（本地，每个组件实例独立）
+  // ============================================
+
+  /** 是否正在加载 */
+  const isLoading = ref(false)
+
+  /** 是否正在初始化服务 */
+  const isInitializing = ref(false)
+
+  /** 是否正在下载 */
+  const isDownloading = ref(false)
+
+  /** 错误信息 */
+  const error = ref<string | null>(null)
+
+  /** 搜索结果 */
+  const results = ref<RegulationDocument[]>([])
+
+  // 加载持久化的搜索偏好
+  const savedPrefs = loadSearchPrefs()
+
+  /** 搜索状态 */
+  const searchState = reactive<RegulationSearchState>({
+    keyword: savedPrefs.keyword || '',
+    docType: savedPrefs.docType || 'all',
+    validity: savedPrefs.validity || 'all',
+    dateFilter: savedPrefs.dateFilter || 'all',
+    startDate: savedPrefs.startDate || '',
+    endDate: savedPrefs.endDate || '',
+  })
+
+  // 监听搜索偏好变化，自动持久化
+  watch(
+    () => ({
+      keyword: searchState.keyword,
+      docType: searchState.docType,
+      validity: searchState.validity,
+      dateFilter: searchState.dateFilter,
+      startDate: searchState.startDate,
+      endDate: searchState.endDate,
+    }),
+    (newPrefs) => {
+      saveSearchPrefs(newPrefs)
+    },
+    { deep: true },
+  )
+
+  /** 当前下载的文档 */
+  const downloadingDoc = ref<RegulationDocument | null>(null)
+
+  // ============================================
+  // 从 Pinia Store 引用的全局状态（组件切换不丢失）
+  // ============================================
+
+  /** 扫描状态（全局） */
+  const isScanning = computed(() => regulationStore.isScanning)
+
+  /** 扫描进度（全局） */
+  const scanProgress = computed(() => regulationStore.scanProgress)
+
+  /** 同步对比状态（全局） */
+  const isSyncing = computed(() => regulationStore.isSyncing)
+
+  /** 同步对比结果（全局） */
+  const syncResult = computed(() => regulationStore.syncResult)
+
+  /** 数据库同步状态（全局） */
+  const dbSyncStatus = computed(() => regulationStore.dbSyncStatus)
+
+  // ============================================
+  // Computed
+  // ============================================
+
+  /** 有效文档数量 */
+  const validCount = computed(() =>
+    results.value.filter((d) => d.validity === '有效').length
+  )
+
+  /** 失效文档数量 */
+  const invalidCount = computed(() =>
+    results.value.filter((d) => d.validity === '失效' || d.validity === '废止').length
+  )
+
+  /** 是否可以搜索（只检查是否正在加载，sidecar 会自动初始化） */
+  const canSearch = computed(() => !isLoading.value && !isInitializing.value)
+
+  /** 是否可以下载 */
+  const canDownload = computed(() => !isDownloading.value && !isInitializing.value)
+
+  /** 本地索引文档数量 */
+  const localDocCount = computed(() => regulationIndex.docCount.value)
+
+  /** 本地索引是否已初始化 */
+  const isLocalIndexReady = computed(() => regulationIndex.isInitialized.value)
+
+  /** 本地搜索耗时（毫秒） */
+  const localSearchElapsedMs = computed(() => regulationIndex.searchElapsedMs.value)
+
+  /** 是否正在本地搜索 */
+  const isLocalSearching = computed(() => regulationIndex.isSearching.value)
+
+  // ============================================
+  // Methods
+  // ============================================
+
+  /**
+   * 初始化本地索引
+   * 应在组件挂载时调用
+   */
+  async function initLocalIndex(): Promise<boolean> {
+    return await regulationIndex.initIndex()
+  }
+
+  /**
+   * 本地搜索规章（毫秒级响应）
+   * 搜索已下载并索引的文档
+   */
+  async function searchLocal(): Promise<RegulationDocument[]> {
+    if (!searchState.keyword.trim()) {
+      results.value = []
+      return []
+    }
+
+    const docs = await regulationIndex.localSearch(searchState.keyword, {
+      validity: searchState.validity,
+      docType: searchState.docType,
+      limit: 100,
+    })
+
+    // 更新结果到 UI
+    results.value = docs
+
+    return docs
+  }
+
+  /**
+   * 混合搜索：先本地后在线，合并去重
+   * 本地结果毫秒级返回先展示，在线结果补充后合并
+   */
+  async function searchHybrid(): Promise<void> {
+    if (isLoading.value) {
+      return
+    }
+
+    error.value = null
+    let localResults: RegulationDocument[] = []
+
+    // 1. 先尝试本地搜索（毫秒级）
+    if (isLocalIndexReady.value && searchState.keyword.trim()) {
+      localResults = await searchLocal()
+      if (localResults.length > 0) {
+        results.value = localResults
+        console.log(`[RegulationQuery] 本地搜索返回 ${localResults.length} 条结果，耗时 ${localSearchElapsedMs.value}ms`)
+      }
+    }
+
+    // 2. 发起在线搜索
+    try {
+      isLoading.value = true
+
+      const { startDate, endDate } = getDateRange()
+
+      const onlineResult = await invoke<RegulationSearchResult>(
+        'regulation_online_search',
+        {
+          keyword: searchState.keyword,
+          docType: searchState.docType === 'all' ? null : searchState.docType,
+          validity: searchState.validity === 'all' ? null : searchState.validity,
+          startDate: startDate || null,
+          endDate: endDate || null,
+        }
+      )
+
+      // 3. 合并本地 + 在线结果，按 URL 或标题去重
+      const existingUrls = new Set(localResults.map(d => d.url))
+      const existingTitles = new Set(localResults.map(d => d.title))
+      const newOnlineDocs = onlineResult.documents.filter(
+        d => !existingUrls.has(d.url) && !existingTitles.has(d.title)
+      )
+
+      results.value = [...localResults, ...newOnlineDocs]
+      console.log(`[RegulationQuery] 智能搜索: 本地 ${localResults.length} + 在线新增 ${newOnlineDocs.length} = 总计 ${results.value.length}`)
+    } catch (err) {
+      // 在线搜索失败不影响本地结果
+      if (localResults.length === 0) {
+        error.value = err instanceof Error ? err.message : String(err)
+      } else {
+        console.warn('[RegulationQuery] 在线搜索失败，仅显示本地结果:', err)
+      }
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  /**
+   * 计算日期范围
+   */
+  function getDateRange(): { startDate: string; endDate: string } {
+    const now = new Date()
+    let startDate = ''
+    const endDate = formatDate(now)
+
+    switch (searchState.dateFilter) {
+      case '1day':
+        startDate = formatDate(new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000))
+        break
+      case '7days':
+        startDate = formatDate(new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000))
+        break
+      case '30days':
+        startDate = formatDate(new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000))
+        break
+      case 'custom':
+        return {
+          startDate: searchState.startDate,
+          endDate: searchState.endDate,
+        }
+      default:
+        return { startDate: '', endDate: '' }
+    }
+
+    return { startDate, endDate }
+  }
+
+  /**
+   * 格式化日期为 YYYY-MM-DD
+   */
+  function formatDate(date: Date): string {
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+
+  /**
+   * 搜索规章（Rust 原生在线搜索，不依赖 Python Sidecar）
+   */
+  async function search(): Promise<void> {
+    if (isLoading.value) {
+      return
+    }
+
+    try {
+      isLoading.value = true
+      error.value = null
+
+      const { startDate, endDate } = getDateRange()
+
+      // 使用 Rust 原生在线搜索命令（替代 Python Sidecar）
+      const result = await invoke<RegulationSearchResult>(
+        'regulation_online_search',
+        {
+          keyword: searchState.keyword,
+          docType: searchState.docType === 'all' ? null : searchState.docType,
+          validity: searchState.validity === 'all' ? null : searchState.validity,
+          startDate: startDate || null,
+          endDate: endDate || null,
+        }
+      )
+
+      results.value = result.documents
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+      results.value = []
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  /**
+   * 下载文档
+   * 下载成功后自动添加到本地索引
+   */
+  async function download(document: RegulationDocument): Promise<string | null> {
+    if (isDownloading.value) {
+      return null
+    }
+
+    try {
+      isDownloading.value = true
+      downloadingDoc.value = document
+      error.value = null
+
+      const result = await invoke<{
+        success: boolean
+        file_path: string
+        file_type: string
+        error?: string
+      }>('regulation_download_single', {
+        request: {
+          document,
+          preferAttachment: true,
+        },
+      })
+
+      if (result.success) {
+
+        // 下载成功后，添加到本地索引
+        try {
+          // 构建本地索引文档（添加文件路径）
+          const indexDoc = {
+            ...document,
+            file_path: result.file_path,
+            content: '', // 暂不提取 PDF 正文
+          }
+          await regulationIndex.addDocument(indexDoc)
+          console.log(`[RegulationQuery] 文档已添加到本地索引: ${document.title}`)
+        } catch (indexErr) {
+          // 索引失败不影响下载结果
+          console.warn('[RegulationQuery] 添加到本地索引失败:', indexErr)
+        }
+
+        return result.file_path
+      } else {
+        error.value = result.error || '下载失败'
+        return null
+      }
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+      return null
+    } finally {
+      isDownloading.value = false
+      downloadingDoc.value = null
+    }
+  }
+
+  /**
+   * 批量下载文档
+   */
+  async function downloadBatch(
+    documents: RegulationDocument[],
+    onProgress?: (current: number, total: number, doc: RegulationDocument) => void
+  ): Promise<{ success: number; failed: number }> {
+    let success = 0
+    let failed = 0
+
+    for (let i = 0; i < documents.length; i++) {
+      const doc = documents[i]
+      onProgress?.(i + 1, documents.length, doc)
+
+      const result = await download(doc)
+      if (result) {
+        success++
+      } else {
+        failed++
+      }
+    }
+
+    return { success, failed }
+  }
+
+  /**
+   * 使用 Rust 原生批量下载
+   * 利用 Rust crawler + Tantivy 索引
+   */
+  async function downloadBatchNative(
+    documents: RegulationDocument[]
+  ): Promise<{ success: number; skipped: number; failed: number }> {
+    try {
+      isLoading.value = true
+      error.value = null
+
+      // 构建下载项
+      const items = documents.map((doc) => ({
+        url: doc.pdf_url || doc.url,
+        title: doc.title,
+        doc_number: doc.doc_number || '',
+        doc_type: doc.doc_type,
+        source_url: doc.url,
+      }))
+
+      // 调用 Rust 批量下载命令
+      const result = await invoke<{
+        success: number
+        skipped: number
+        failed: number
+        failed_urls: string[]
+      }>('regulation_batch_download', {
+        request: { items },
+      })
+
+      // 下载完成后，触发 PDF 文本提取和索引
+      await processPendingFiles()
+
+      return {
+        success: result.success,
+        skipped: result.skipped,
+        failed: result.failed,
+      }
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+      throw err
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  /**
+   * 处理待提取文件（PDF 文本提取 + 索引）
+   * 应在批量下载后调用
+   */
+  async function processPendingFiles(batchSize = 10): Promise<{
+    processed: number
+    indexed: number
+    needs_ocr: number
+    failed: number
+  }> {
+    try {
+      const result = await invoke<{
+        processed: number
+        indexed: number
+        needs_ocr: number
+        failed: number
+      }>('regulation_process_pending', {
+        batchSize,
+      })
+
+      // 刷新本地索引统计
+      await regulationIndex.refreshStats()
+
+      return result
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+      throw err
+    }
+  }
+
+  /**
+   * 扫描本地目录，将 PDF 文件入库 + 入索引
+   *
+   * 扫描状态保存在 Pinia Store 中，组件切换不会丢失进度。
+   *
+   * @param dirPath 要扫描的目录路径
+   * @param recursive 是否递归扫描子目录，默认 true
+   */
+  async function scanLocalDir(
+    dirPath: string,
+    recursive = true,
+  ): Promise<RegulationScanResponse | null> {
+    if (regulationStore.isScanning) {
+      return null
+    }
+
+    error.value = null
+
+    // 使用全局 store 管理扫描生命周期
+    const result = await regulationStore.startScan(
+      dirPath,
+      recursive,
+      async () => {
+        if (!regulationIndex.isInitialized.value) {
+          await regulationIndex.initIndex()
+        }
+      },
+    )
+
+    // 扫描完成后刷新索引统计
+    if (result) {
+      await regulationIndex.refreshStats()
+    }
+
+    // 错误状态统一从 store.scanError 获取，不再重复复制到 composable 的 error
+    return result
+  }
+
+  /**
+   * 同步对比：从 CAAC 官网全量爬取规章列表，与本地数据库对比
+   *
+   * @param docType 文档类型：all, regulation, normative
+   * @param maxPages 最大爬取页数
+   */
+  async function syncCompare(
+    docType: string = 'all',
+    maxPages: number = 20,
+  ): Promise<RegulationSyncCompareResponse | null> {
+    if (regulationStore.isSyncing) {
+      return null
+    }
+
+    try {
+      regulationStore.startSyncCompare()
+      error.value = null
+
+      const compareResult = await invoke<RegulationSyncCompareResponse>(
+        'regulation_sync_compare_online',
+        {
+          docType,
+          maxPages,
+        }
+      )
+
+      regulationStore.finishSyncCompare(compareResult)
+
+      console.log(
+        `[RegulationQuery] 同步对比完成: 在线 ${compareResult.online_total}, 匹配 ${compareResult.matched}, 新增 ${compareResult.new_regulations.length}`
+      )
+
+      return compareResult
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+      console.error('[RegulationQuery] 同步对比失败:', err)
+      regulationStore.finishSyncCompare(null)
+      return null
+    }
+  }
+
+  /**
+   * 获取数据库同步状态
+   */
+  async function refreshDbStatus(): Promise<void> {
+    await regulationStore.refreshDbStatus()
+  }
+
+  /**
+   * OCR 处理队列中待处理的 PDF 文件（纯 Rust 实现）
+   *
+   * 流程：
+   * 1. 调用 Rust 后端的 regulation_ocr_pending 命令
+   * 2. Rust 端使用 pdfium + PP-OCRv4 进行 PDF OCR
+   * 3. 自动将 OCR 结果写入 Tantivy 索引
+   *
+   * 注意：不再依赖 Python sidecar，所有 OCR 工作在 Rust 端完成。
+   */
+  async function ocrPendingFiles(
+    batchSize: number = 5,
+    onProgress?: (current: string, done: number, total: number) => void,
+  ): Promise<{ success: number; failed: number; total: number }> {
+    try {
+      error.value = null
+
+      // 监听 OCR 进度事件
+      let progressCleanup: (() => void) | null = null
+      if (onProgress) {
+        const { listen } = await import('@tauri-apps/api/event')
+        const unlisten = await listen<{
+          current: string
+          ocr_success: number
+          ocr_failed: number
+          skipped: number
+          current_page?: number
+          total_pages?: number
+        }>('regulation:ocr-progress', (event) => {
+          const { current, ocr_success, ocr_failed } = event.payload
+          onProgress(current, ocr_success + ocr_failed, batchSize)
+        })
+        progressCleanup = unlisten
+      }
+
+      // 调用 Rust 原生 OCR 命令（pdfium + PP-OCRv4）
+      const result = await invoke<{
+        processed: number
+        ocr_success: number
+        ocr_failed: number
+        skipped: number
+      }>('regulation_ocr_pending', { batchSize })
+
+      // 清理进度监听
+      progressCleanup?.()
+
+      // 刷新索引统计
+      await regulationIndex.refreshStats()
+
+      console.log(
+        `[RegulationQuery] OCR 处理完成 (Rust 原生): 成功 ${result.ocr_success}, 失败 ${result.ocr_failed}`,
+      )
+      return {
+        success: result.ocr_success,
+        failed: result.ocr_failed,
+        total: result.processed,
+      }
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+      console.error('[RegulationQuery] OCR 处理失败:', err)
+      return { success: 0, failed: 0, total: 0 }
+    }
+  }
+
+  /**
+   * 清除搜索结果
+   */
+  function clearResults(): void {
+    results.value = []
+    error.value = null
+  }
+
+  /**
+   * 重置搜索状态
+   */
+  function resetSearch(): void {
+    searchState.keyword = ''
+    searchState.docType = 'all'
+    searchState.validity = 'all'
+    searchState.dateFilter = 'all'
+    searchState.startDate = ''
+    searchState.endDate = ''
+    clearResults()
+  }
+
+  /**
+   * 设置文档类型筛选
+   */
+  function setDocType(type: RegulationDocType): void {
+    searchState.docType = type
+  }
+
+  /**
+   * 设置有效性筛选
+   */
+  function setValidity(validity: RegulationValidity): void {
+    searchState.validity = validity
+  }
+
+  /**
+   * 设置日期筛选
+   */
+  function setDateFilter(filter: DateFilter): void {
+    searchState.dateFilter = filter
+  }
+
+  return {
+    // State
+    isLoading,
+    isInitializing,
+    isDownloading,
+    isScanning,
+    isSyncing,
+    error,
+    results,
+    searchState,
+    downloadingDoc,
+    scanProgress,
+    syncResult,
+    dbSyncStatus,
+
+    // Computed
+    validCount,
+    invalidCount,
+    canSearch,
+    canDownload,
+    localDocCount,
+    isLocalIndexReady,
+    localSearchElapsedMs,
+    isLocalSearching,
+
+    // Store 状态（统一通过 composable 暴露，避免组件直接访问 store）
+    scanResult: computed(() => regulationStore.scanResult),
+    scanError: computed(() => regulationStore.scanError),
+    isOcrProcessing: computed(() => regulationStore.isOcrProcessing),
+    ocrProgressText: computed(() => regulationStore.ocrProgressText),
+    clearScanResult: () => regulationStore.clearScanResult(),
+
+    // Methods
+    search,
+    searchLocal,
+    searchHybrid,
+    initLocalIndex,
+    download,
+    downloadBatch,
+    downloadBatchNative,
+    processPendingFiles,
+    scanLocalDir,
+    syncCompare,
+    ocrPendingFiles,
+    refreshDbStatus,
+    resetSearch,
+    setDocType,
+    setValidity,
+    setDateFilter,
+  }
+}

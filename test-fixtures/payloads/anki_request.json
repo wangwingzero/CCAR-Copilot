@@ -1,0 +1,14 @@
+{
+  "id": "550e8400-e29b-41d4-a716-446655440003",
+  "service": "anki",
+  "method": "add_card",
+  "params": {
+    "deck": "Default",
+    "note_type": "Basic",
+    "fields": {
+      "Front": "screenshot",
+      "Back": "截图"
+    },
+    "tags": ["vocabulary", "tech"]
+  }
+}

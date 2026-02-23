@@ -1,0 +1,30 @@
+# Tauri Sidecar Binaries
+
+此目录存放 Tauri Sidecar 可执行文件。
+
+## 命名规范
+
+Tauri 要求 sidecar 二进制文件使用特定的命名格式：
+`{name}-{target_triple}{extension}`
+
+### Windows
+- x64: `huge_sidecar-x86_64-pc-windows-msvc.exe`
+- ARM64: `huge_sidecar-aarch64-pc-windows-msvc.exe`
+
+### Linux
+- x64: `huge_sidecar-x86_64-unknown-linux-gnu`
+- ARM64: `huge_sidecar-aarch64-unknown-linux-gnu`
+
+### macOS
+- x64: `huge_sidecar-x86_64-apple-darwin`
+- ARM64: `huge_sidecar-aarch64-apple-darwin`
+
+## 构建方法
+
+```bash
+cd HuGeScreenshot-tauri/python
+pip install -r requirements.txt
+python build_sidecar.py
+```
+
+构建脚本会自动将打包后的文件复制到此目录。
