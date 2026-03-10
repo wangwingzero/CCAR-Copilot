@@ -62,9 +62,13 @@ export interface UpdateStatus {
 }
 
 /**
- * 更新配置
+ * 更新 Composable 内部配置（对应 Rust 返回的 snake_case 格式）
+ *
+ * 注意：此类型与 @/types/config.ts 中的 UpdateConfig 是不同层面的配置。
+ * - @/types/config.ts 的 UpdateConfig 对应 settings store 的前端配置
+ * - 此类型对应 Rust 后端 get_update_config / set_update_config 命令的配置
  */
-export interface UpdateConfig {
+export interface RustUpdateConfig {
   /** 是否启用自动更新 */
   auto_update_enabled: boolean
   /** 检查更新间隔（小时） */
@@ -108,7 +112,7 @@ export function useUpdate() {
   // 状态
   const status = ref<UpdateStatus>({ status: 'Idle' })
   const currentVersion = ref<string>('')
-  const config = ref<UpdateConfig>({
+  const config = ref<RustUpdateConfig>({
     auto_update_enabled: true,
     check_interval_hours: 24,
     check_on_startup: true,
@@ -146,7 +150,7 @@ export function useUpdate() {
    */
   async function fetchConfig(): Promise<void> {
     try {
-      config.value = await invoke<UpdateConfig>('get_update_config')
+      config.value = await invoke<RustUpdateConfig>('get_update_config')
     } catch (e) {
       console.error('获取更新配置失败:', e)
       error.value = String(e)
@@ -158,7 +162,7 @@ export function useUpdate() {
    *
    * @param newConfig - 新的更新配置
    */
-  async function saveConfig(newConfig: UpdateConfig): Promise<void> {
+  async function saveConfig(newConfig: RustUpdateConfig): Promise<void> {
     try {
       await invoke('set_update_config', { config: newConfig })
       config.value = newConfig
@@ -195,7 +199,9 @@ export function useUpdate() {
       if (result.status === 'Available' && config.value.auto_download) {
         // 延迟一下再开始下载，让用户看到更新可用的状态
         setTimeout(() => {
-          downloadAndInstall()
+          downloadAndInstall().catch((e) => {
+            console.error('自动下载更新失败:', e)
+          })
         }, 1000)
       }
 
@@ -227,7 +233,9 @@ export function useUpdate() {
       // 如果配置了自动安装且更新已准备好，则自动重启
       if (result.status === 'PendingRestart' && config.value.auto_install) {
         setTimeout(() => {
-          restartApp()
+          restartApp().catch((e) => {
+            console.error('自动重启失败:', e)
+          })
         }, 3000)
       }
 

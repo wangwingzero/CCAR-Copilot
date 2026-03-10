@@ -7,6 +7,7 @@ use regex::Regex;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 use urlencoding::encode;
@@ -28,6 +29,12 @@ const NORMATIVE_FL: &str = "14";   // 规范性文件分类
 const STANDARD_FL: &str = "15";    // 标准规范分类
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+// 共享的日期正则（parse_regulation_page 和 parse_normative_page 均使用）
+static DATE_FROM_URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/t(\d{4})(\d{2})(\d{2})_").expect("date_from_url regex pattern invalid"));
+static DATE_NORMALIZE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\d{4})年(\d{1,2})月(\d{1,2})日").expect("date_normalize regex pattern invalid"));
 
 /// 在线搜索请求
 #[derive(Debug, Deserialize)]
@@ -301,19 +308,35 @@ impl CaacOnlineSearcher {
 
 /// 解析 CCAR 规章搜索结果页面
 fn parse_regulation_page(html_content: &str) -> HuGeResult<Vec<OnlineDocument>> {
+    use std::sync::LazyLock;
+
+    // 缓存编译后的选择器和正则，避免每次调用重复编译
+    static TABLE_SELECTOR: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse("table.t_table").unwrap());
+    static ANY_TABLE_SELECTOR: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse("table").unwrap());
+    static TR_SELECTOR: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse("tr").unwrap());
+    static TD_SELECTOR: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse("td").unwrap());
+    static A_SELECTOR: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse("a[href]").unwrap());
+    static TITLE_CELL_SELECTOR: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse("td.t_l").unwrap());
+    static DETAIL_SELECTOR: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse("div.t_l_content li").unwrap());
+
     let mut documents = Vec::new();
     let document = Html::parse_document(html_content);
 
     // 查找搜索结果表格
-    let table_selector = Selector::parse("table.t_table").unwrap();
-    let table = document.select(&table_selector).next();
+    let table = document.select(&TABLE_SELECTOR).next();
 
     let table = match table {
         Some(t) => t,
         None => {
             // 尝试找任意 table
-            let any_table = Selector::parse("table").unwrap();
-            match document.select(&any_table).next() {
+            match document.select(&ANY_TABLE_SELECTOR).next() {
                 Some(t) => t,
                 None => return Ok(documents),
             }
@@ -321,25 +344,14 @@ fn parse_regulation_page(html_content: &str) -> HuGeResult<Vec<OnlineDocument>> 
     };
 
     // 获取表格行
-    let tr_selector = Selector::parse("tr").unwrap();
-    let td_selector = Selector::parse("td").unwrap();
-    let a_selector = Selector::parse("a[href]").unwrap();
-    let title_cell_selector = Selector::parse("td.t_l").unwrap();
-    let detail_selector = Selector::parse("div.t_l_content li").unwrap();
-
-    let date_from_url_re = Regex::new(r"/t(\d{4})(\d{2})(\d{2})_")
-        .expect("date_from_url regex pattern invalid");
-    let date_normalize_re = Regex::new(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
-        .expect("date_normalize regex pattern invalid");
-
-    for row in table.select(&tr_selector) {
-        let cells: Vec<_> = row.select(&td_selector).collect();
+    for row in table.select(&TR_SELECTOR) {
+        let cells: Vec<_> = row.select(&TD_SELECTOR).collect();
         if cells.len() < 4 {
             continue;
         }
 
         // 查找标题单元格
-        let title_cell = row.select(&title_cell_selector).next()
+        let title_cell = row.select(&TITLE_CELL_SELECTOR).next()
             .or_else(|| cells.get(1).copied());
 
         let title_cell = match title_cell {
@@ -348,7 +360,7 @@ fn parse_regulation_page(html_content: &str) -> HuGeResult<Vec<OnlineDocument>> 
         };
 
         // 查找链接
-        let link = match title_cell.select(&a_selector).next() {
+        let link = match title_cell.select(&A_SELECTOR).next() {
             Some(a) => a,
             None => continue,
         };
@@ -372,11 +384,11 @@ fn parse_regulation_page(html_content: &str) -> HuGeResult<Vec<OnlineDocument>> 
             .unwrap_or_default();
 
         // 发布日期（从 URL 提取）
-        let mut publish_date = extract_date_from_url(&full_url, &date_from_url_re);
+        let mut publish_date = extract_date_from_url(&full_url, &DATE_FROM_URL_RE);
 
         // 发布单位（从详情 div 提取）
         let mut office_unit = String::new();
-        for li in title_cell.select(&detail_selector) {
+        for li in title_cell.select(&DETAIL_SELECTOR) {
             let li_text = li.text().collect::<String>().trim().to_string();
             if li_text.contains("办文单位：") {
                 office_unit = li_text.replace("办文单位：", "").trim().to_string();
@@ -386,7 +398,7 @@ fn parse_regulation_page(html_content: &str) -> HuGeResult<Vec<OnlineDocument>> 
                     .replace("发文日期:", "")
                     .trim()
                     .to_string();
-                if let Some(normalized) = normalize_date(&date_text, &date_normalize_re) {
+                if let Some(normalized) = normalize_date(&date_text, &DATE_NORMALIZE_RE) {
                     publish_date = normalized;
                 }
             } else if li_text.contains("有效性") && validity.is_empty() {
@@ -419,44 +431,42 @@ fn parse_regulation_page(html_content: &str) -> HuGeResult<Vec<OnlineDocument>> 
 
 /// 解析规范性文件搜索结果页面
 fn parse_normative_page(html_content: &str) -> HuGeResult<Vec<OnlineDocument>> {
+    // 缓存 CSS 选择器和正则（避免每次调用重新编译）
+    static NORM_TABLE_SELECTOR: LazyLock<Selector> = LazyLock::new(|| Selector::parse("table.t_table").unwrap());
+    static NORM_ANY_TABLE: LazyLock<Selector> = LazyLock::new(|| Selector::parse("table").unwrap());
+    static NORM_TR: LazyLock<Selector> = LazyLock::new(|| Selector::parse("tr").unwrap());
+    static NORM_TD: LazyLock<Selector> = LazyLock::new(|| Selector::parse("td").unwrap());
+    static NORM_A: LazyLock<Selector> = LazyLock::new(|| Selector::parse("a[href]").unwrap());
+    static NORM_TITLE_CELL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("td.tdMC").unwrap());
+    static NORM_DOC_NUMBER: LazyLock<Selector> = LazyLock::new(|| Selector::parse("td.strFL").unwrap());
+    static NORM_VALIDITY: LazyLock<Selector> = LazyLock::new(|| Selector::parse("td.strGF").unwrap());
+    static NORM_DATE: LazyLock<Selector> = LazyLock::new(|| Selector::parse("td.tdRQ").unwrap());
+    static NORM_UNIT: LazyLock<Selector> = LazyLock::new(|| Selector::parse("div.t_l_content li.t_l_content_left").unwrap());
+
     let mut documents = Vec::new();
     let document = Html::parse_document(html_content);
 
     // 查找搜索结果表格
-    let table_selector = Selector::parse("table.t_table").unwrap();
-    let table = document.select(&table_selector).next();
+    let table = document.select(&NORM_TABLE_SELECTOR).next();
 
     let table = match table {
         Some(t) => t,
         None => {
-            let any_table = Selector::parse("table").unwrap();
-            match document.select(&any_table).next() {
+            match document.select(&NORM_ANY_TABLE).next() {
                 Some(t) => t,
                 None => return Ok(documents),
             }
         }
     };
 
-    let tr_selector = Selector::parse("tr").unwrap();
-    let td_selector = Selector::parse("td").unwrap();
-    let a_selector = Selector::parse("a[href]").unwrap();
-    let title_cell_selector = Selector::parse("td.tdMC").unwrap();
-    let doc_number_selector = Selector::parse("td.strFL").unwrap();
-    let validity_selector = Selector::parse("td.strGF").unwrap();
-    let date_selector = Selector::parse("td.tdRQ").unwrap();
-    let unit_selector = Selector::parse("div.t_l_content li.t_l_content_left").unwrap();
-
-    let date_normalize_re = Regex::new(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
-        .expect("date_normalize regex pattern invalid");
-
-    for row in table.select(&tr_selector) {
-        let cells: Vec<_> = row.select(&td_selector).collect();
+    for row in table.select(&NORM_TR) {
+        let cells: Vec<_> = row.select(&NORM_TD).collect();
         if cells.len() < 4 {
             continue;
         }
 
         // 标题单元格
-        let title_cell = row.select(&title_cell_selector).next()
+        let title_cell = row.select(&NORM_TITLE_CELL).next()
             .or_else(|| cells.get(1).copied());
 
         let title_cell = match title_cell {
@@ -465,7 +475,7 @@ fn parse_normative_page(html_content: &str) -> HuGeResult<Vec<OnlineDocument>> {
         };
 
         // 链接
-        let link = match title_cell.select(&a_selector).next() {
+        let link = match title_cell.select(&NORM_A).next() {
             Some(a) => a,
             None => continue,
         };
@@ -479,26 +489,26 @@ fn parse_normative_page(html_content: &str) -> HuGeResult<Vec<OnlineDocument>> {
         let full_url = build_full_url(href);
 
         // 文号
-        let doc_number = row.select(&doc_number_selector).next()
+        let doc_number = row.select(&NORM_DOC_NUMBER).next()
             .map(|c| c.text().collect::<String>().trim().to_string())
             .unwrap_or_default();
 
         // 有效性
-        let validity = row.select(&validity_selector).next()
+        let validity = row.select(&NORM_VALIDITY).next()
             .map(|c| c.text().collect::<String>().trim().to_string())
             .unwrap_or_default();
 
         // 日期
-        let date_cells: Vec<_> = row.select(&date_selector).collect();
+        let date_cells: Vec<_> = row.select(&NORM_DATE).collect();
         let sign_date = date_cells.first()
-            .and_then(|c| normalize_date(c.text().collect::<String>().trim(), &date_normalize_re))
+            .and_then(|c| normalize_date(c.text().collect::<String>().trim(), &DATE_NORMALIZE_RE))
             .unwrap_or_default();
         let publish_date = date_cells.get(1)
-            .and_then(|c| normalize_date(c.text().collect::<String>().trim(), &date_normalize_re))
+            .and_then(|c| normalize_date(c.text().collect::<String>().trim(), &DATE_NORMALIZE_RE))
             .unwrap_or_default();
 
         // 发布单位
-        let office_unit = title_cell.select(&unit_selector).next()
+        let office_unit = title_cell.select(&NORM_UNIT).next()
             .map(|c| {
                 let text = c.text().collect::<String>().trim().to_string();
                 text.replace("办文单位：", "").trim().to_string()

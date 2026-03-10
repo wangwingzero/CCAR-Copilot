@@ -11,7 +11,7 @@ import { useRegulationStore } from '@/stores/regulation'
 import { useRegulationIndex } from './useRegulationIndex'
 import type {
   RegulationDocument,
-  RegulationSearchResult,
+  RegulationSearchResponse,
   RegulationDocType,
   RegulationValidity,
   RegulationScanResponse,
@@ -152,12 +152,12 @@ export function useRegulationQuery() {
 
   /** 有效文档数量 */
   const validCount = computed(() =>
-    results.value.filter((d) => d.validity === '有效').length
+    results.value.filter((d: RegulationDocument) => d.validity === '有效').length
   )
 
   /** 失效文档数量 */
   const invalidCount = computed(() =>
-    results.value.filter((d) => d.validity === '失效' || d.validity === '废止').length
+    results.value.filter((d: RegulationDocument) => d.validity === '失效' || d.validity === '废止').length
   )
 
   /** 是否可以搜索（只检查是否正在加载，sidecar 会自动初始化） */
@@ -177,6 +177,22 @@ export function useRegulationQuery() {
 
   /** 是否正在本地搜索 */
   const isLocalSearching = computed(() => regulationIndex.isSearching.value)
+
+  /** 摘要预览开关（localStorage 持久化） */
+  const SNIPPET_ENABLED_KEY = 'regulation-snippet-enabled'
+  const showSnippets = ref((() => {
+    try {
+      return localStorage.getItem(SNIPPET_ENABLED_KEY) === 'true'
+    } catch { return false }
+  })())
+  watch(showSnippets, (v) => {
+    try { localStorage.setItem(SNIPPET_ENABLED_KEY, String(v)) } catch { /* ignore */ }
+  })
+
+  /** 获取指定文档的摘要 */
+  function getSnippet(docUrl: string): string | undefined {
+    return regulationIndex.snippetMap.value.get(docUrl)
+  }
 
   // ============================================
   // Methods
@@ -206,10 +222,10 @@ export function useRegulationQuery() {
       limit: 100,
     })
 
-    // 更新结果到 UI
-    results.value = docs
+    // 更新结果到 UI（标题匹配优先）
+    results.value = sortByTitleMatch(docs, searchState.keyword)
 
-    return docs
+    return results.value
   }
 
   /**
@@ -229,7 +245,7 @@ export function useRegulationQuery() {
       localResults = await searchLocal()
       if (localResults.length > 0) {
         results.value = localResults
-        console.log(`[RegulationQuery] 本地搜索返回 ${localResults.length} 条结果，耗时 ${localSearchElapsedMs.value}ms`)
+        console.warn(`[RegulationQuery] 本地搜索返回 ${localResults.length} 条结果，耗时 ${localSearchElapsedMs.value}ms`)
       }
     }
 
@@ -239,7 +255,7 @@ export function useRegulationQuery() {
 
       const { startDate, endDate } = getDateRange()
 
-      const onlineResult = await invoke<RegulationSearchResult>(
+      const onlineResult = await invoke<RegulationSearchResponse>(
         'regulation_online_search',
         {
           keyword: searchState.keyword,
@@ -251,14 +267,14 @@ export function useRegulationQuery() {
       )
 
       // 3. 合并本地 + 在线结果，按 URL 或标题去重
-      const existingUrls = new Set(localResults.map(d => d.url))
-      const existingTitles = new Set(localResults.map(d => d.title))
+      const existingUrls = new Set(localResults.map((d: RegulationDocument) => d.url))
+      const existingTitles = new Set(localResults.map((d: RegulationDocument) => d.title))
       const newOnlineDocs = onlineResult.documents.filter(
-        d => !existingUrls.has(d.url) && !existingTitles.has(d.title)
+        (d: RegulationDocument) => !existingUrls.has(d.url) && !existingTitles.has(d.title)
       )
 
-      results.value = [...localResults, ...newOnlineDocs]
-      console.log(`[RegulationQuery] 智能搜索: 本地 ${localResults.length} + 在线新增 ${newOnlineDocs.length} = 总计 ${results.value.length}`)
+      results.value = sortByTitleMatch([...localResults, ...newOnlineDocs], searchState.keyword)
+      console.warn(`[RegulationQuery] 智能搜索: 本地 ${localResults.length} + 在线新增 ${newOnlineDocs.length} = 总计 ${results.value.length}`)
     } catch (err) {
       // 在线搜索失败不影响本地结果
       if (localResults.length === 0) {
@@ -269,6 +285,28 @@ export function useRegulationQuery() {
     } finally {
       isLoading.value = false
     }
+  }
+
+  /**
+   * 按标题匹配度重新排序结果
+   * 标题中包含搜索关键词的文档优先显示，位置越靠前优先级越高
+   */
+  function sortByTitleMatch(docs: RegulationDocument[], keyword: string): RegulationDocument[] {
+    if (!keyword.trim()) return docs
+    const kw = keyword.trim().toLowerCase()
+    return [...docs].sort((a, b) => {
+      const aIdx = a.title.toLowerCase().indexOf(kw)
+      const bIdx = b.title.toLowerCase().indexOf(kw)
+      // 都不包含 → 保持原序
+      if (aIdx === -1 && bIdx === -1) return 0
+      // 只有一个包含 → 包含的排前面
+      if (aIdx === -1) return 1
+      if (bIdx === -1) return -1
+      // 都包含 → 关键词位置越靠前越好
+      if (aIdx !== bIdx) return aIdx - bIdx
+      // 位置相同 → 标题越短越精确
+      return a.title.length - b.title.length
+    })
   }
 
   /**
@@ -326,7 +364,7 @@ export function useRegulationQuery() {
       const { startDate, endDate } = getDateRange()
 
       // 使用 Rust 原生在线搜索命令（替代 Python Sidecar）
-      const result = await invoke<RegulationSearchResult>(
+      const result = await invoke<RegulationSearchResponse>(
         'regulation_online_search',
         {
           keyword: searchState.keyword,
@@ -337,7 +375,7 @@ export function useRegulationQuery() {
         }
       )
 
-      results.value = result.documents
+      results.value = sortByTitleMatch(result.documents, searchState.keyword)
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err)
       results.value = []
@@ -383,7 +421,7 @@ export function useRegulationQuery() {
             content: '', // 暂不提取 PDF 正文
           }
           await regulationIndex.addDocument(indexDoc)
-          console.log(`[RegulationQuery] 文档已添加到本地索引: ${document.title}`)
+          console.warn(`[RegulationQuery] 文档已添加到本地索引: ${document.title}`)
         } catch (indexErr) {
           // 索引失败不影响下载结果
           console.warn('[RegulationQuery] 添加到本地索引失败:', indexErr)
@@ -543,6 +581,32 @@ export function useRegulationQuery() {
   }
 
   /**
+   * 全盘扫描所有 PDF 文件
+   *
+   * 遍历 Windows 所有盘符，递归收集 PDF 并入库索引。
+   * 扫描状态保存在 Pinia Store 中，组件切换不会丢失进度。
+   */
+  async function scanAllDrives(): Promise<RegulationScanResponse | null> {
+    if (regulationStore.isScanning) {
+      return null
+    }
+
+    error.value = null
+
+    const result = await regulationStore.startFullScan(async () => {
+      if (!regulationIndex.isInitialized.value) {
+        await regulationIndex.initIndex()
+      }
+    })
+
+    if (result) {
+      await regulationIndex.refreshStats()
+    }
+
+    return result
+  }
+
+  /**
    * 同步对比：从 CAAC 官网全量爬取规章列表，与本地数据库对比
    *
    * @param docType 文档类型：all, regulation, normative
@@ -570,7 +634,7 @@ export function useRegulationQuery() {
 
       regulationStore.finishSyncCompare(compareResult)
 
-      console.log(
+      console.warn(
         `[RegulationQuery] 同步对比完成: 在线 ${compareResult.online_total}, 匹配 ${compareResult.matched}, 新增 ${compareResult.new_regulations.length}`
       )
 
@@ -639,7 +703,7 @@ export function useRegulationQuery() {
       // 刷新索引统计
       await regulationIndex.refreshStats()
 
-      console.log(
+      console.warn(
         `[RegulationQuery] OCR 处理完成 (Rust 原生): 成功 ${result.ocr_success}, 失败 ${result.ocr_failed}`,
       )
       return {
@@ -720,6 +784,7 @@ export function useRegulationQuery() {
     isLocalIndexReady,
     localSearchElapsedMs,
     isLocalSearching,
+    showSnippets,
 
     // Store 状态（统一通过 composable 暴露，避免组件直接访问 store）
     scanResult: computed(() => regulationStore.scanResult),
@@ -738,6 +803,7 @@ export function useRegulationQuery() {
     downloadBatchNative,
     processPendingFiles,
     scanLocalDir,
+    scanAllDrives,
     syncCompare,
     ocrPendingFiles,
     refreshDbStatus,
@@ -745,5 +811,6 @@ export function useRegulationQuery() {
     setDocType,
     setValidity,
     setDateFilter,
+    getSnippet,
   }
 }

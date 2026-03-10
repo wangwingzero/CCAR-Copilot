@@ -20,6 +20,8 @@ export interface RegulationDocument {
   publish_date: string
   /** 原始 URL */
   url: string
+  /** PDF 下载 URL */
+  pdf_url?: string
   /** 本地文件路径 */
   file_path: string
   /** PDF 正文内容（用于全文搜索） */
@@ -48,6 +50,8 @@ export interface RegulationSearchResponse {
   total: number
   /** 搜索耗时（毫秒） */
   elapsed_ms: number
+  /** 正文摘要（与 documents 等长，在线结果为 null） */
+  snippets?: (string | null)[]
 }
 
 /** 索引统计信息 */

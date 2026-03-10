@@ -17,6 +17,11 @@ use super::schema::{RegulationDocument, RegulationFields};
 /// 索引内存预算（64MB）
 const INDEX_MEMORY_BUDGET: usize = 64 * 1024 * 1024;
 
+/// 索引 Schema 版本号
+/// v1: content 字段仅 TEXT（不存储）
+/// v2: content 字段 TEXT | STORED（支持搜索摘要）
+const INDEX_SCHEMA_VERSION: u32 = 2;
+
 /// 规章索引管理器
 pub struct RegulationIndex {
     index: Index,
@@ -44,6 +49,17 @@ impl RegulationIndex {
         std::fs::create_dir_all(&index_path).map_err(|e| {
             HuGeError::Internal(format!("创建索引目录失败: {}", e))
         })?;
+
+        // 检查 Schema 版本，不匹配时删除旧索引
+        let version_file = index_path.join(".schema_version");
+        let current_version = Self::read_schema_version(&version_file);
+        if current_version != INDEX_SCHEMA_VERSION && index_path.join("meta.json").exists() {
+            info!(
+                "索引 Schema 版本不匹配 (当前: {}, 需要: {})，删除旧索引以重建",
+                current_version, INDEX_SCHEMA_VERSION
+            );
+            Self::delete_index_files(&index_path)?;
+        }
 
         // 构建 Schema
         let (schema, fields) = RegulationFields::build_schema();
@@ -75,6 +91,9 @@ impl RegulationIndex {
         let writer = index
             .writer(INDEX_MEMORY_BUDGET)
             .map_err(|e| HuGeError::Internal(format!("创建 IndexWriter 失败: {}", e)))?;
+
+        // 写入当前 Schema 版本号
+        Self::write_schema_version(&version_file, INDEX_SCHEMA_VERSION);
 
         info!("规章索引初始化完成");
 
@@ -212,7 +231,10 @@ impl RegulationIndex {
         Ok(results)
     }
 
-    /// 按有效性筛选搜索
+    /// 按有效性和文档类型筛选搜索
+    ///
+    /// 使用 Tantivy `BooleanQuery` 将全文搜索与 TermQuery 过滤条件组合，
+    /// 直接在索引层过滤，避免先取再筛的低效做法。
     pub fn search_with_filter(
         &self,
         query_str: &str,
@@ -220,29 +242,81 @@ impl RegulationIndex {
         doc_type: Option<&str>,
         limit: usize,
     ) -> Result<Vec<RegulationDocument>, HuGeError> {
-        let mut results = self.search(query_str, limit * 2)?; // 多取一些用于筛选
+        use tantivy::query::{BooleanQuery, TermQuery};
+        use tantivy::schema::IndexRecordOption;
+        use tantivy::Term;
 
-        // 应用筛选条件
+        if query_str.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let searcher = self.reader.searcher();
+
+        // 构建全文搜索子查询
+        let mut query_parser = QueryParser::for_index(
+            &self.index,
+            vec![self.fields.title, self.fields.office_unit, self.fields.content],
+        );
+        query_parser.set_field_boost(self.fields.title, 50.0);
+        query_parser.set_field_boost(self.fields.office_unit, 5.0);
+        query_parser.set_field_boost(self.fields.content, 0.5);
+
+        let text_query = query_parser.parse_query(query_str).map_err(|e| {
+            HuGeError::Internal(format!("解析查询失败: {}", e))
+        })?;
+
+        // 收集过滤条件作为 MUST 子句
+        let mut clauses: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+        clauses.push((tantivy::query::Occur::Must, text_query));
+
         if let Some(v) = validity {
-            results.retain(|doc| {
-                if v == "valid" {
-                    doc.validity == "有效"
-                } else if v == "invalid" {
-                    doc.validity == "失效" || doc.validity == "废止"
-                } else {
-                    true
-                }
-            });
+            let term_values: Vec<&str> = match v {
+                "valid" => vec!["有效"],
+                "invalid" => vec!["失效", "废止"],
+                _ => vec![],
+            };
+            if term_values.len() == 1 {
+                let term = Term::from_field_text(self.fields.validity, term_values[0]);
+                let tq = TermQuery::new(term, IndexRecordOption::Basic);
+                clauses.push((tantivy::query::Occur::Must, Box::new(tq)));
+            } else if term_values.len() > 1 {
+                // "失效" OR "废止" → 用 BooleanQuery(SHOULD) 包裹，再作为 MUST 子句
+                let sub: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = term_values
+                    .iter()
+                    .map(|val| {
+                        let term = Term::from_field_text(self.fields.validity, val);
+                        let tq: Box<dyn tantivy::query::Query> =
+                            Box::new(TermQuery::new(term, IndexRecordOption::Basic));
+                        (tantivy::query::Occur::Should, tq)
+                    })
+                    .collect();
+                clauses.push((tantivy::query::Occur::Must, Box::new(BooleanQuery::new(sub))));
+            }
         }
 
         if let Some(t) = doc_type {
             if t != "all" {
-                results.retain(|doc| doc.doc_type == t);
+                let term = Term::from_field_text(self.fields.doc_type, t);
+                let tq = TermQuery::new(term, IndexRecordOption::Basic);
+                clauses.push((tantivy::query::Occur::Must, Box::new(tq)));
             }
         }
 
-        // 截取到限制数量
-        results.truncate(limit);
+        let compound_query = BooleanQuery::new(clauses);
+
+        let top_docs = searcher
+            .search(&compound_query, &TopDocs::with_limit(limit))
+            .map_err(|e| HuGeError::Internal(format!("搜索失败: {}", e)))?;
+
+        let mut results = Vec::with_capacity(top_docs.len());
+        for (_score, doc_address) in top_docs {
+            if let Ok(doc) = searcher.doc::<TantivyDocument>(doc_address) {
+                results.push(RegulationDocument::from_tantivy_doc(&doc, &self.fields));
+            }
+        }
+
+        debug!("搜索 '{}' (filter: validity={:?}, doc_type={:?}) 返回 {} 条结果",
+            query_str, validity, doc_type, results.len());
         Ok(results)
     }
 
@@ -318,6 +392,40 @@ impl RegulationIndex {
     /// 获取索引路径
     pub fn index_path(&self) -> &PathBuf {
         &self.index_path
+    }
+
+    /// 读取 Schema 版本号文件，不存在则返回 0
+    fn read_schema_version(version_file: &std::path::Path) -> u32 {
+        std::fs::read_to_string(version_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+    }
+
+    /// 写入 Schema 版本号文件
+    fn write_schema_version(version_file: &std::path::Path, version: u32) {
+        if let Err(e) = std::fs::write(version_file, version.to_string()) {
+            warn!("写入 Schema 版本文件失败: {}", e);
+        }
+    }
+
+    /// 删除索引目录下的所有文件（保留目录本身）
+    fn delete_index_files(index_path: &std::path::Path) -> Result<(), HuGeError> {
+        let entries = std::fs::read_dir(index_path).map_err(|e| {
+            HuGeError::Internal(format!("读取索引目录失败: {}", e))
+        })?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    warn!("删除索引文件失败 {:?}: {}", path, e);
+                }
+            }
+        }
+
+        info!("旧索引文件已删除");
+        Ok(())
     }
 }
 

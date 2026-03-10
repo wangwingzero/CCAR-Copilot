@@ -758,6 +758,7 @@ mod tests {
 // ============================================
 
 #[cfg(test)]
+#[cfg(feature = "proptest")]
 mod property_tests {
     use super::*;
     use image::{ImageBuffer, Rgba};

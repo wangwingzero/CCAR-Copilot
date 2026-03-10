@@ -1260,6 +1260,7 @@ mod tests {
     // 因为 resize_image 函数的行为与图像内容无关，只与尺寸有关
     // ========================================
 
+    #[cfg(feature = "proptest")]
     mod property_tests {
         use super::*;
         use proptest::prelude::*;

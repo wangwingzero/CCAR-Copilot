@@ -2,6 +2,7 @@
 //!
 //! 提供前端调用的规章索引相关命令。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -9,10 +10,15 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{debug, info, warn};
 
+use super::crawler::{RegulationCrawler, DownloadConfig, DownloadItem};
 use super::index::RegulationIndex;
+use super::online_search::{CaacOnlineSearcher, OnlineDocument, OnlineSearchRequest, OnlineSearchResponse};
 use super::schema::RegulationDocument;
-use super::search::{sort_results, SortOrder};
+use super::search::{sort_results, generate_snippets, SortOrder};
+use super::sync::{BatchProgress, calculate_file_hash};
+use super::text_extractor;
 use crate::database::regulation as regulation_db;
+use crate::database::regulation::SyncStatus;
 
 /// 规章索引状态（Tauri 管理）
 pub struct RegulationIndexState {
@@ -156,6 +162,9 @@ pub struct SearchResponse {
     pub total: usize,
     /// 搜索耗时（毫秒）
     pub elapsed_ms: u64,
+    /// 正文摘要（与 documents 等长，在线结果为 null）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippets: Option<Vec<Option<String>>>,
 }
 
 /// 索引统计信息
@@ -323,6 +332,14 @@ pub async fn regulation_local_search(
     let elapsed = start.elapsed();
     let total = results.len();
 
+    // 生成正文摘要（150 字符限制）
+    let snippets = generate_snippets(&results, &request.query, 150);
+
+    // 清空 documents 中的 content 字段（不把完整正文发给前端）
+    for doc in &mut results {
+        doc.content.clear();
+    }
+
     info!(
         "本地搜索 '{}' 完成，返回 {} 条结果，耗时 {}ms",
         request.query,
@@ -334,6 +351,7 @@ pub async fn regulation_local_search(
         documents: results,
         total,
         elapsed_ms: elapsed.as_millis() as u64,
+        snippets: Some(snippets),
     })
 }
 
@@ -460,10 +478,6 @@ pub async fn regulation_index_exists(
 // 批量下载相关命令
 // ============================================================================
 
-use crate::database::regulation::SyncStatus;
-use super::crawler::{RegulationCrawler, DownloadConfig, DownloadItem};
-use super::sync::BatchProgress;
-
 /// 批量下载状态（Tauri 管理）
 pub struct BatchDownloadState {
     /// 下载进度
@@ -576,9 +590,12 @@ fn extract_attachment_url(html: &str, detail_url: &str, exts: &[&str]) -> Option
 }
 
 fn extract_text_from_html_body(html: &str) -> String {
+    use std::sync::LazyLock;
+    static BODY_SELECTOR: LazyLock<scraper::Selector> =
+        LazyLock::new(|| scraper::Selector::parse("body").expect("body selector should be valid"));
+
     let doc = scraper::Html::parse_document(html);
-    let selector = scraper::Selector::parse("body").expect("body selector should be valid");
-    if let Some(body) = doc.select(&selector).next() {
+    if let Some(body) = doc.select(&BODY_SELECTOR).next() {
         body.text()
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -922,8 +939,6 @@ pub async fn regulation_get_sync_status<R: tauri::Runtime>(
 // PDF 文本提取 + 索引命令
 // ============================================================================
 
-use super::text_extractor;
-
 /// 处理结果
 #[derive(Debug, Serialize)]
 pub struct ProcessFilesResponse {
@@ -1088,11 +1103,395 @@ pub async fn regulation_process_pending<R: tauri::Runtime>(
 }
 
 // ============================================================================
-// 本地目录扫描命令
+// 共享扫描/OCR 辅助函数
 // ============================================================================
 
-use super::sync::calculate_file_hash;
-use std::collections::HashSet;
+/// 发送扫描进度事件（减少样板代码）
+fn emit_scan_progress<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    scanned: usize,
+    total_found: usize,
+    new_files: usize,
+    duplicates: usize,
+    indexed: usize,
+    needs_ocr: usize,
+    failed: usize,
+    current_file: Option<String>,
+    phase: &str,
+    ocr_processed: Option<usize>,
+    ocr_total: Option<usize>,
+) {
+    if let Err(e) = app.emit("regulation:scan-progress", ScanProgress {
+        scanned,
+        total_found,
+        new_files,
+        duplicates,
+        indexed,
+        needs_ocr,
+        failed,
+        current_file,
+        phase: phase.to_string(),
+        ocr_processed,
+        ocr_total,
+    }) {
+        debug!("发送扫描进度事件失败: {}", e);
+    }
+}
+
+/// 打开数据库并加载去重数据（哈希 + 路径）
+fn open_db_and_load_dedup_data<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(rusqlite::Connection, HashSet<String>, HashSet<String>), String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("获取应用数据目录失败: {}", e))?;
+    let db_path = app_data_dir.join("history.db");
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("打开数据库失败: {}", e))?;
+
+    regulation_db::init_regulation_schema(&conn)
+        .map_err(|e| format!("初始化规章表失败: {}", e))?;
+
+    let existing_hashes: HashSet<String> = {
+        let mut stmt = conn.prepare("SELECT sha256 FROM regulation_files")
+            .map_err(|e| format!("查询已有哈希失败: {}", e))?;
+        let rows: HashSet<String> = stmt.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("读取哈希失败: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+        rows
+    };
+
+    let existing_paths: HashSet<String> = {
+        let mut stmt = conn.prepare("SELECT file_path FROM regulation_files")
+            .map_err(|e| format!("查询已有路径失败: {}", e))?;
+        let rows: HashSet<String> = stmt.query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("读取路径失败: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+        rows
+    };
+
+    info!("已有 {} 个哈希 + {} 个路径用于去重", existing_hashes.len(), existing_paths.len());
+    Ok((conn, existing_hashes, existing_paths))
+}
+
+/// 对单个文件执行 OCR 处理（先尝试 pdfium 文本提取，不足时使用 PP-OCRv4）
+///
+/// 返回 `true` 表示成功（文本已写入索引），`false` 表示失败。
+fn ocr_single_file<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    conn: &rusqlite::Connection,
+    index_state: &State<'_, RegulationIndexState>,
+    file: &regulation_db::RegulationFile,
+) -> bool {
+    // 更新状态为 processing
+    let _ = regulation_db::update_ocr_status(conn, file.id, "processing", 0, 0, None);
+
+    // Step 1: 先尝试 pdfium 文本提取
+    let pdf_path = std::path::Path::new(&file.file_path);
+    let extraction = text_extractor::extract_text_from_pdf(pdf_path);
+
+    match extraction {
+        Ok(result) if !result.needs_ocr => {
+            match write_to_index(index_state, conn, file, result.text) {
+                Ok(()) => {
+                    info!("pdfium 文本提取成功: {}", file.title);
+                    return true;
+                }
+                Err(e) => {
+                    let _ = regulation_db::update_ocr_status(conn, file.id, "failed", 0, 0, Some(&e));
+                    return false;
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // Step 2: 使用 Rust 原生 PDF OCR（pdfium + PP-OCRv4）
+    info!("使用 OCR 处理: {}", file.title);
+    let app_clone = app.clone();
+    let file_title = file.title.clone();
+
+    match super::pdf_ocr::ocr_pdf(
+        &file.file_path,
+        50,
+        Some(&|current_page, total_pages| {
+            if let Err(e) = app_clone.emit("regulation:ocr-progress", serde_json::json!({
+                "current": file_title,
+                "current_page": current_page,
+                "total_pages": total_pages,
+            })) {
+                tracing::debug!("发送 OCR 页面进度事件失败: {}", e);
+            }
+        }),
+    ) {
+        Ok(ocr_result) if ocr_result.success && !ocr_result.text.is_empty() => {
+            if ocr_result.page_count > 0 {
+                let _ = regulation_db::update_page_count(conn, file.id, ocr_result.page_count as i32);
+            }
+            match write_to_index(index_state, conn, file, ocr_result.text) {
+                Ok(()) => {
+                    info!(
+                        "OCR 成功: {} ({}页, OCR {}页, {:.2}s)",
+                        file.title, ocr_result.page_count, ocr_result.ocr_pages, ocr_result.elapsed
+                    );
+                    true
+                }
+                Err(e) => {
+                    let _ = regulation_db::update_ocr_status(conn, file.id, "failed", 0, 0, Some(&e));
+                    false
+                }
+            }
+        }
+        Ok(ocr_result) => {
+            let error_msg = if ocr_result.error.is_empty() {
+                "OCR 未能提取到文本".to_string()
+            } else {
+                ocr_result.error
+            };
+            let _ = regulation_db::update_ocr_status(conn, file.id, "failed", 0, 0, Some(&error_msg));
+            warn!("OCR 无文本: {} - {}", file.title, error_msg);
+            false
+        }
+        Err(e) => {
+            let _ = regulation_db::update_ocr_status(
+                conn, file.id, "failed", 0, 0, Some(&format!("OCR 失败: {}", e)),
+            );
+            warn!("OCR 失败: {} - {}", file.title, e);
+            false
+        }
+    }
+}
+
+/// 处理 PDF 文件列表：去重、文本提取、入库、入索引
+///
+/// 返回 `(new_files, duplicates, indexed, needs_ocr, failed)`
+fn process_pdf_batch<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    pdf_files: &[PathBuf],
+    conn: &rusqlite::Connection,
+    index_state: &State<'_, RegulationIndexState>,
+    existing_hashes: &HashSet<String>,
+    existing_paths: &HashSet<String>,
+    copy_mode: LocalCopyMode,
+    target_dir: &Path,
+) -> Result<(usize, usize, usize, usize, usize), String> {
+    let total_found = pdf_files.len();
+    let mut new_files = 0;
+    let mut duplicates = 0;
+    let mut indexed = 0;
+    let mut needs_ocr = 0;
+    let mut failed = 0;
+    let mut batch_docs = Vec::new();
+    let batch_commit_size = 20;
+
+    for (i, pdf_path) in pdf_files.iter().enumerate() {
+        let filename = pdf_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let file_path_str = pdf_path.to_string_lossy().to_string();
+
+        // 发送进度（每 5 个或最后一个）
+        if i % 5 == 0 || i == total_found - 1 {
+            if let Err(e) = app.emit("regulation:scan-progress", ScanProgress {
+                scanned: i + 1,
+                total_found,
+                new_files,
+                duplicates,
+                indexed,
+                needs_ocr,
+                failed,
+                current_file: Some(file_path_str.clone()),
+                phase: "processing".to_string(),
+                ocr_processed: None,
+                ocr_total: None,
+            }) {
+                debug!("发送扫描进度事件失败: {}", e);
+            }
+        }
+
+        // RegisterOnly 模式按路径去重
+        if copy_mode == LocalCopyMode::RegisterOnly && existing_paths.contains(&file_path_str) {
+            duplicates += 1;
+            continue;
+        }
+
+        // 计算 SHA256
+        let sha256 = match calculate_file_hash(pdf_path) {
+            Ok(hash) => hash,
+            Err(e) => {
+                failed += 1;
+                warn!("计算哈希失败: {} - {}", filename, e);
+                continue;
+            }
+        };
+
+        // 哈希去重
+        if existing_hashes.contains(&sha256) {
+            duplicates += 1;
+            continue;
+        }
+
+        // 计算存储路径
+        let stored_path = match resolve_storage_path(pdf_path, &sha256, copy_mode, target_dir) {
+            Ok(path) => path,
+            Err(e) => {
+                failed += 1;
+                warn!("解析存储路径失败: {} - {}", filename, e);
+                continue;
+            }
+        };
+        let stored_path_str = stored_path.to_string_lossy().to_string();
+
+        // 从文件名解析元数据
+        let (title, doc_number, doc_type) = parse_filename_metadata(&filename);
+
+        // 获取文件大小
+        let file_size = std::fs::metadata(&stored_path)
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+
+        // 提取 PDF 文本
+        let (content, text_status, text_needs_ocr) =
+            match text_extractor::extract_text_from_pdf(&stored_path) {
+                Ok(extraction) if !extraction.needs_ocr => (extraction.text, "done", false),
+                Ok(extraction) => (extraction.text, "pending", true),
+                Err(e) => {
+                    debug!("文本提取失败: {} - {}", filename, e);
+                    (String::new(), "pending", true)
+                }
+            };
+
+        let file_url = format!("file:///{}", stored_path_str.replace('\\', "/"));
+
+        // 插入数据库
+        let db_file = regulation_db::RegulationFile {
+            title: title.clone(),
+            doc_number: doc_number.clone(),
+            doc_type: doc_type.clone(),
+            url: file_url.clone(),
+            pdf_url: None,
+            sha256: sha256.clone(),
+            file_path: stored_path_str.clone(),
+            file_size,
+            ocr_status: text_status.to_string(),
+            ..Default::default()
+        };
+
+        match regulation_db::insert_file(conn, &db_file) {
+            Ok(file_id) => {
+                new_files += 1;
+                if !text_needs_ocr && !content.is_empty() {
+                    let reg_doc = super::schema::RegulationDocument {
+                        title,
+                        doc_number,
+                        validity: String::new(),
+                        doc_type,
+                        office_unit: String::new(),
+                        sign_date: String::new(),
+                        publish_date: String::new(),
+                        url: file_url,
+                        file_path: stored_path_str,
+                        content,
+                    };
+                    batch_docs.push((file_id, reg_doc));
+                    indexed += 1;
+                } else {
+                    needs_ocr += 1;
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                warn!("插入数据库失败: {} - {}", filename, e);
+            }
+        }
+
+        // 批量提交索引
+        if batch_docs.len() >= batch_commit_size {
+            commit_batch_to_index(&batch_docs, index_state, conn)?;
+            batch_docs.clear();
+        }
+    }
+
+    // 提交剩余文档
+    if !batch_docs.is_empty() {
+        commit_batch_to_index(&batch_docs, index_state, conn)?;
+    }
+
+    Ok((new_files, duplicates, indexed, needs_ocr, failed))
+}
+
+/// 自动 OCR 处理待 OCR 文件，发送扫描进度事件
+///
+/// 返回 `(ocr_success, ocr_failed)`
+fn run_auto_ocr<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    conn: &rusqlite::Connection,
+    index_state: &State<'_, RegulationIndexState>,
+    needs_ocr_count: usize,
+    total_found: usize,
+    new_files: usize,
+    duplicates: usize,
+    indexed: usize,
+    failed: usize,
+) -> Result<(usize, usize), String> {
+    info!("开始自动 OCR 处理 {} 个扫描版文件", needs_ocr_count);
+
+    // 发送 OCR 阶段进度
+    if let Err(e) = app.emit("regulation:scan-progress", ScanProgress {
+        scanned: total_found,
+        total_found,
+        new_files,
+        duplicates,
+        indexed,
+        needs_ocr: needs_ocr_count,
+        failed,
+        current_file: Some("准备 OCR 处理...".to_string()),
+        phase: "ocr".to_string(),
+        ocr_processed: Some(0),
+        ocr_total: Some(needs_ocr_count),
+    }) {
+        debug!("发送 OCR 阶段进度事件失败: {}", e);
+    }
+
+    let pending_files = regulation_db::get_pending_ocr_files(conn, needs_ocr_count)
+        .map_err(|e| format!("获取待 OCR 文件失败: {}", e))?;
+
+    let mut ocr_success = 0;
+    let mut ocr_failed = 0;
+
+    for (i, file) in pending_files.iter().enumerate() {
+        // 发送 OCR 进度
+        if let Err(e) = app.emit("regulation:scan-progress", ScanProgress {
+            scanned: total_found,
+            total_found,
+            new_files,
+            duplicates,
+            indexed,
+            needs_ocr: needs_ocr_count,
+            failed,
+            current_file: Some(file.title.clone()),
+            phase: "ocr".to_string(),
+            ocr_processed: Some(i),
+            ocr_total: Some(pending_files.len()),
+        }) {
+            debug!("发送 OCR 进度事件失败: {}", e);
+        }
+
+        if ocr_single_file(app, conn, index_state, file) {
+            ocr_success += 1;
+        } else {
+            ocr_failed += 1;
+        }
+    }
+
+    info!("自动 OCR 完成: 成功 {}, 失败 {}", ocr_success, ocr_failed);
+    Ok((ocr_success, ocr_failed))
+}
+
+// ============================================================================
+// 本地目录扫描命令
+// ============================================================================
 
 /// 扫描进度事件
 #[derive(Debug, Clone, Serialize)]
@@ -1148,32 +1547,36 @@ pub struct ScanResponse {
 
 /// 从文件名解析规章元数据
 fn parse_filename_metadata(filename: &str) -> (String, String, String) {
+    use std::sync::LazyLock;
+
     // 移除扩展名
     let name = filename
         .rsplit_once('.')
         .map(|(n, _)| n)
         .unwrap_or(filename);
 
-    // 尝试提取文号（常见格式）
-    let doc_number_patterns = [
-        // AC-xxx-xxx 格式（咨询通告）
-        regex::Regex::new(r"(AC-\d+[-\w]*(?:R\d+)?)").expect("AC regex pattern invalid"),
-        // CCAR-xxx 格式（民航规章）
-        regex::Regex::new(r"(CCAR-\d+[-\w]*)").expect("CCAR regex pattern invalid"),
-        // IB-xxx 格式（信息通告）
-        regex::Regex::new(r"(IB-[\w-]+)").expect("IB regex pattern invalid"),
-        // MD-xxx 格式（管理文件）
-        regex::Regex::new(r"(MD-[\w-]+)").expect("MD regex pattern invalid"),
-        // AP-xxx 格式（管理程序）
-        regex::Regex::new(r"(AP-\d+[-\w]*)").expect("AP regex pattern invalid"),
-        // OSB-xxx 格式
-        regex::Regex::new(r"(OSB-[\w-]+)").expect("OSB regex pattern invalid"),
-        // MHT/MH 格式（民航行业标准）
-        regex::Regex::new(r"(MH[T]?\d+[-\w]*)").expect("MH/MHT regex pattern invalid"),
-    ];
+    // 缓存编译后的正则表达式，避免每次调用重复编译
+    static DOC_NUMBER_PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+        vec![
+            // AC-xxx-xxx 格式（咨询通告）
+            regex::Regex::new(r"(AC-\d+[-\w]*(?:R\d+)?)").expect("AC regex pattern invalid"),
+            // CCAR-xxx 格式（民航规章）
+            regex::Regex::new(r"(CCAR-\d+[-\w]*)").expect("CCAR regex pattern invalid"),
+            // IB-xxx 格式（信息通告）
+            regex::Regex::new(r"(IB-[\w-]+)").expect("IB regex pattern invalid"),
+            // MD-xxx 格式（管理文件）
+            regex::Regex::new(r"(MD-[\w-]+)").expect("MD regex pattern invalid"),
+            // AP-xxx 格式（管理程序）
+            regex::Regex::new(r"(AP-\d+[-\w]*)").expect("AP regex pattern invalid"),
+            // OSB-xxx 格式
+            regex::Regex::new(r"(OSB-[\w-]+)").expect("OSB regex pattern invalid"),
+            // MHT/MH 格式（民航行业标准）
+            regex::Regex::new(r"(MH[T]?\d+[-\w]*)").expect("MH/MHT regex pattern invalid"),
+        ]
+    });
 
     let mut doc_number = String::new();
-    for pattern in &doc_number_patterns {
+    for pattern in DOC_NUMBER_PATTERNS.iter() {
         if let Some(caps) = pattern.captures(name) {
             doc_number = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
             break;
@@ -1274,21 +1677,8 @@ pub async fn regulation_scan_local_dir<R: tauri::Runtime>(
     }
 
     // Phase 1: 发现所有 PDF 文件
-    if let Err(e) = app.emit("regulation:scan-progress", ScanProgress {
-        scanned: 0,
-        total_found: 0,
-        new_files: 0,
-        duplicates: 0,
-        indexed: 0,
-        needs_ocr: 0,
-        failed: 0,
-        current_file: Some("正在扫描目录...".to_string()),
-        phase: "discovering".to_string(),
-        ocr_processed: None,
-        ocr_total: None,
-    }) {
-        debug!("发送扫描进度事件失败: {}", e);
-    }
+    emit_scan_progress(&app, 0, 0, 0, 0, 0, 0, 0,
+        Some("正在扫描目录...".to_string()), "discovering", None, None);
 
     let pdf_files = collect_pdf_files(dir, recursive);
     let total_found = pdf_files.len();
@@ -1296,374 +1686,38 @@ pub async fn regulation_scan_local_dir<R: tauri::Runtime>(
 
     if total_found == 0 {
         return Ok(ScanResponse {
-            total_found: 0,
-            new_files: 0,
-            duplicates: 0,
-            indexed: 0,
-            needs_ocr: 0,
-            failed: 0,
-            skipped_non_pdf: 0,
-            ocr_success: 0,
-            ocr_failed: 0,
+            total_found: 0, new_files: 0, duplicates: 0, indexed: 0,
+            needs_ocr: 0, failed: 0, skipped_non_pdf: 0, ocr_success: 0, ocr_failed: 0,
         });
     }
 
-    // 获取数据库连接
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("获取应用数据目录失败: {}", e))?;
-    let db_path = app_data_dir.join("history.db");
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("打开数据库失败: {}", e))?;
+    // 获取数据库连接 + 加载去重数据
+    let (conn, existing_hashes, existing_paths) = open_db_and_load_dedup_data(&app)?;
 
-    regulation_db::init_regulation_schema(&conn)
-        .map_err(|e| format!("初始化规章表失败: {}", e))?;
-
-    // 加载已有哈希用于快速去重
-    let existing_hashes: HashSet<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT sha256 FROM regulation_files"
-        ).map_err(|e| format!("查询已有哈希失败: {}", e))?;
-        
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| format!("读取哈希失败: {}", e))?
-            .filter_map(|r| r.ok())
-            .collect();
-        rows
-    };
-    info!("已有 {} 个文件哈希用于去重", existing_hashes.len());
-
-    // 也加载已有文件路径用于去重
-    let existing_paths: HashSet<String> = {
-        let mut stmt = conn.prepare(
-            "SELECT file_path FROM regulation_files"
-        ).map_err(|e| format!("查询已有路径失败: {}", e))?;
-        
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| format!("读取路径失败: {}", e))?
-            .filter_map(|r| r.ok())
-            .collect();
-        rows
-    };
-
-    // Phase 2: 处理每个 PDF 文件
-    let mut new_files = 0;
-    let mut duplicates = 0;
-    let mut indexed = 0;
-    let mut needs_ocr = 0;
-    let mut failed = 0;
-    let mut batch_docs = Vec::new();
-    let batch_commit_size = 20; // 每 20 个文件批量提交一次索引
-
-    for (i, pdf_path) in pdf_files.iter().enumerate() {
-        let filename = pdf_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let file_path_str = pdf_path.to_string_lossy().to_string();
-
-        // 发送进度
-        if i % 5 == 0 || i == total_found - 1 {
-            if let Err(e) = app.emit("regulation:scan-progress", ScanProgress {
-                scanned: i + 1,
-                total_found,
-                new_files,
-                duplicates,
-                indexed,
-                needs_ocr,
-                failed,
-                current_file: Some(filename.clone()),
-                phase: "processing".to_string(),
-                ocr_processed: None,
-                ocr_total: None,
-            }) {
-                debug!("发送扫描进度事件失败: {}", e);
-            }
-        }
-
-        // register_only 模式才按路径判重
-        if copy_mode == LocalCopyMode::RegisterOnly && existing_paths.contains(&file_path_str) {
-            duplicates += 1;
-            debug!("文件路径已存在，跳过: {}", filename);
-            continue;
-        }
-
-        // 计算 SHA256
-        let sha256 = match calculate_file_hash(pdf_path) {
-            Ok(hash) => hash,
-            Err(e) => {
-                failed += 1;
-                warn!("计算哈希失败: {} - {}", filename, e);
-                continue;
-            }
-        };
-
-        // 检查哈希去重
-        if existing_hashes.contains(&sha256) {
-            duplicates += 1;
-            debug!("文件哈希已存在（重复文件），跳过: {}", filename);
-            continue;
-        }
-
-        // 计算导入后的存储路径
-        let stored_path = match resolve_storage_path(pdf_path, &sha256, copy_mode, &target_dir) {
-            Ok(path) => path,
-            Err(e) => {
-                failed += 1;
-                warn!("复制文件失败: {} - {}", filename, e);
-                continue;
-            }
-        };
-        let stored_path_str = stored_path.to_string_lossy().to_string();
-
-        // 从文件名解析元数据
-        let (title, doc_number, doc_type) = parse_filename_metadata(&filename);
-
-        // 获取文件大小
-        let file_size = std::fs::metadata(&stored_path)
-            .map(|m| m.len() as i64)
-            .unwrap_or(0);
-
-        // 提取 PDF 文本
-        let (content, text_status, text_needs_ocr) =
-            match text_extractor::extract_text_from_pdf(&stored_path) {
-            Ok(extraction) if !extraction.needs_ocr => {
-                (extraction.text, "done", false)
-            }
-            Ok(extraction) => {
-                (extraction.text, "pending", true)
-            }
-            Err(e) => {
-                debug!("文本提取失败: {} - {}", filename, e);
-                (String::new(), "pending", true)
-            }
-        };
-
-        // 使用 file:// URL 作为唯一标识（本地文件）
-        let file_url = format!("file:///{}", stored_path_str.replace('\\', "/"));
-
-        // 插入数据库
-        let db_file = regulation_db::RegulationFile {
-            title: title.clone(),
-            doc_number: doc_number.clone(),
-            doc_type: doc_type.clone(),
-            url: file_url.clone(),
-            pdf_url: None,
-            sha256: sha256.clone(),
-            file_path: stored_path_str.clone(),
-            file_size,
-            ocr_status: text_status.to_string(),
-            ..Default::default()
-        };
-
-        match regulation_db::insert_file(&conn, &db_file) {
-            Ok(file_id) => {
-                new_files += 1;
-
-                if !text_needs_ocr && !content.is_empty() {
-                    // 文本充足，准备写入 Tantivy 索引
-                    let reg_doc = super::schema::RegulationDocument {
-                        title,
-                        doc_number,
-                        validity: String::new(), // 本地文件暂无有效性信息
-                        doc_type,
-                        office_unit: String::new(),
-                        sign_date: String::new(),
-                        publish_date: String::new(),
-                        url: file_url,
-                        file_path: stored_path_str,
-                        content,
-                    };
-                    batch_docs.push((file_id, reg_doc));
-                    indexed += 1;
-                } else {
-                    needs_ocr += 1;
-                }
-            }
-            Err(e) => {
-                failed += 1;
-                warn!("插入数据库失败: {} - {}", filename, e);
-            }
-        }
-
-        // 批量提交 Tantivy 索引
-        if batch_docs.len() >= batch_commit_size {
-            commit_batch_to_index(&batch_docs, &index_state, &conn)?;
-            batch_docs.clear();
-        }
-    }
-
-    // 提交剩余的文档
-    if !batch_docs.is_empty() {
-        commit_batch_to_index(&batch_docs, &index_state, &conn)?;
-    }
+    // Phase 2: 处理 PDF 文件
+    let (new_files, duplicates, indexed, needs_ocr, failed) = process_pdf_batch(
+        &app, &pdf_files, &conn, &index_state,
+        &existing_hashes, &existing_paths, copy_mode, &target_dir,
+    )?;
 
     info!(
         "扫描完成: 发现 {}, 新增 {}, 重复 {}, 索引 {}, 需OCR {}, 失败 {}",
         total_found, new_files, duplicates, indexed, needs_ocr, failed
     );
 
-    // Phase 3: 自动 OCR 处理（如果有需要 OCR 的文件且启用了 auto_ocr）
-    let mut ocr_success = 0;
-    let mut ocr_failed = 0;
-
-    if auto_ocr && needs_ocr > 0 {
-        info!("开始自动 OCR 处理 {} 个扫描版文件", needs_ocr);
-
-        // 发送 OCR 阶段进度
-        if let Err(e) = app.emit("regulation:scan-progress", ScanProgress {
-            scanned: total_found,
-            total_found,
-            new_files,
-            duplicates,
-            indexed,
-            needs_ocr,
-            failed,
-            current_file: Some("准备 OCR 处理...".to_string()),
-            phase: "ocr".to_string(),
-            ocr_processed: Some(0),
-            ocr_total: Some(needs_ocr),
-        }) {
-            debug!("发送 OCR 阶段进度事件失败: {}", e);
-        }
-
-        // 获取所有待 OCR 文件
-        let pending_files = regulation_db::get_pending_ocr_files(&conn, needs_ocr)
-            .map_err(|e| format!("获取待 OCR 文件失败: {}", e))?;
-
-        for (i, file) in pending_files.iter().enumerate() {
-            // 更新状态为 processing
-            let _ = regulation_db::update_ocr_status(&conn, file.id, "processing", 0, 0, None);
-
-            // 发送 OCR 进度
-            if let Err(e) = app.emit("regulation:scan-progress", ScanProgress {
-                scanned: total_found,
-                total_found,
-                new_files,
-                duplicates,
-                indexed,
-                needs_ocr,
-                failed,
-                current_file: Some(file.title.clone()),
-                phase: "ocr".to_string(),
-                ocr_processed: Some(i),
-                ocr_total: Some(pending_files.len()),
-            }) {
-                debug!("发送 OCR 进度事件失败: {}", e);
-            }
-
-            // Step 1: 先重试 pdfium 文本提取
-            let pdf_path = std::path::Path::new(&file.file_path);
-            let extraction = super::text_extractor::extract_text_from_pdf(pdf_path);
-
-            match extraction {
-                Ok(result) if !result.needs_ocr => {
-                    // pdfium 提取成功
-                    match write_to_index(&index_state, &conn, file, result.text) {
-                        Ok(()) => {
-                            ocr_success += 1;
-                            info!("pdfium 文本提取重试成功: {}", file.title);
-                        }
-                        Err(e) => {
-                            let _ = regulation_db::update_ocr_status(
-                                &conn, file.id, "failed", 0, 0, Some(&e),
-                            );
-                            ocr_failed += 1;
-                        }
-                    }
-                }
-                _ => {
-                    // Step 2: 使用 Rust 原生 PDF OCR
-                    info!("使用 OCR 处理: {}", file.title);
-
-                    let app_clone = app.clone();
-                    let file_title = file.title.clone();
-
-                    match super::pdf_ocr::ocr_pdf(
-                        &file.file_path,
-                        50,
-                        Some(&|current_page, total_pages| {
-                            if let Err(e) = app_clone.emit("regulation:ocr-progress", serde_json::json!({
-                                "current": file_title,
-                                "current_page": current_page,
-                                "total_pages": total_pages,
-                            })) {
-                                tracing::debug!("发送 OCR 页面进度事件失败: {}", e);
-                            }
-                        }),
-                    ) {
-                        Ok(ocr_result) if ocr_result.success && !ocr_result.text.is_empty() => {
-                            if ocr_result.page_count > 0 {
-                                let _ = regulation_db::update_page_count(
-                                    &conn, file.id, ocr_result.page_count as i32,
-                                );
-                            }
-                            match write_to_index(&index_state, &conn, file, ocr_result.text) {
-                                Ok(()) => {
-                                    ocr_success += 1;
-                                    info!(
-                                        "OCR 成功: {} ({}页, OCR {}页, {:.2}s)",
-                                        file.title, ocr_result.page_count,
-                                        ocr_result.ocr_pages, ocr_result.elapsed
-                                    );
-                                }
-                                Err(e) => {
-                                    let _ = regulation_db::update_ocr_status(
-                                        &conn, file.id, "failed", 0, 0, Some(&e),
-                                    );
-                                    ocr_failed += 1;
-                                }
-                            }
-                        }
-                        Ok(ocr_result) => {
-                            let error_msg = if ocr_result.error.is_empty() {
-                                "OCR 未能提取到文本".to_string()
-                            } else {
-                                ocr_result.error
-                            };
-                            let _ = regulation_db::update_ocr_status(
-                                &conn, file.id, "failed", 0, 0, Some(&error_msg),
-                            );
-                            ocr_failed += 1;
-                            warn!("OCR 无文本: {} - {}", file.title, error_msg);
-                        }
-                        Err(e) => {
-                            let error_msg = format!("OCR 失败: {}", e);
-                            let _ = regulation_db::update_ocr_status(
-                                &conn, file.id, "failed", 0, 0, Some(&error_msg),
-                            );
-                            ocr_failed += 1;
-                            warn!("OCR 失败: {} - {}", file.title, e);
-                        }
-                    }
-                }
-            }
-        }
-
-        info!(
-            "自动 OCR 完成: 成功 {}, 失败 {}",
-            ocr_success, ocr_failed
-        );
-    }
+    // Phase 3: 自动 OCR
+    let (ocr_success, ocr_failed) = if auto_ocr && needs_ocr > 0 {
+        run_auto_ocr(&app, &conn, &index_state, needs_ocr,
+            total_found, new_files, duplicates, indexed, failed)?
+    } else {
+        (0, 0)
+    };
 
     // 发送最终进度
-    if let Err(e) = app.emit("regulation:scan-progress", ScanProgress {
-        scanned: total_found,
-        total_found,
-        new_files,
-        duplicates,
-        indexed,
-        needs_ocr,
-        failed,
-        current_file: None,
-        phase: "done".to_string(),
-        ocr_processed: if needs_ocr > 0 { Some(ocr_success + ocr_failed) } else { None },
-        ocr_total: if needs_ocr > 0 { Some(needs_ocr) } else { None },
-    }) {
-        debug!("发送扫描完成事件失败: {}", e);
-    }
+    emit_scan_progress(&app, total_found, total_found, new_files, duplicates,
+        indexed, needs_ocr, failed, None, "done",
+        if needs_ocr > 0 { Some(ocr_success + ocr_failed) } else { None },
+        if needs_ocr > 0 { Some(needs_ocr) } else { None });
 
     info!(
         "全部完成: 发现 {}, 新增 {}, 索引 {}, OCR成功 {}, OCR失败 {}, 跳过 {}",
@@ -1671,15 +1725,106 @@ pub async fn regulation_scan_local_dir<R: tauri::Runtime>(
     );
 
     Ok(ScanResponse {
-        total_found,
-        new_files,
-        duplicates,
-        indexed,
-        needs_ocr,
-        failed,
-        skipped_non_pdf: 0,
-        ocr_success,
-        ocr_failed,
+        total_found, new_files, duplicates, indexed, needs_ocr, failed,
+        skipped_non_pdf: 0, ocr_success, ocr_failed,
+    })
+}
+
+// ============================================================================
+// 同步对比命令
+// ============================================================================
+
+/// 枚举 Windows 所有可用盘符
+fn enumerate_drives() -> Vec<PathBuf> {
+    (b'A'..=b'Z')
+        .map(|c| PathBuf::from(format!("{}:\\", c as char)))
+        .filter(|p| p.exists() && p.is_dir())
+        .collect()
+}
+
+/// 扫描全盘所有 PDF 文件，入库 + 入索引 + 自动 OCR
+///
+/// 遍历 Windows 所有盘符，对每个盘递归收集 PDF 文件，
+/// 复用共享的去重/提取/索引/OCR 流程。
+///
+/// # 参数
+/// - `auto_ocr`: 是否自动对扫描版 PDF 执行 OCR（默认 true）
+#[tauri::command]
+pub async fn regulation_scan_all_drives<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    auto_ocr: Option<bool>,
+    index_state: State<'_, RegulationIndexState>,
+) -> Result<ScanResponse, String> {
+    let auto_ocr = auto_ocr.unwrap_or(true);
+    let drives = enumerate_drives();
+    info!("全盘扫描: 发现 {} 个盘符: {:?}", drives.len(), drives);
+
+    if drives.is_empty() {
+        return Err("未发现任何可用盘符".to_string());
+    }
+
+    // Phase 1: 从所有盘符收集 PDF 文件
+    emit_scan_progress(&app, 0, 0, 0, 0, 0, 0, 0,
+        Some("正在扫描全盘...".to_string()), "discovering", None, None);
+
+    let mut all_pdf_files = Vec::new();
+    for drive in &drives {
+        info!("扫描盘符: {}", drive.display());
+        emit_scan_progress(&app, 0, all_pdf_files.len(), 0, 0, 0, 0, 0,
+            Some(format!("正在扫描 {} ...", drive.display())), "discovering", None, None);
+        let files = collect_pdf_files(drive, true);
+        info!("盘符 {} 发现 {} 个 PDF", drive.display(), files.len());
+        all_pdf_files.extend(files);
+    }
+
+    let total_found = all_pdf_files.len();
+    info!("全盘共发现 {} 个 PDF 文件", total_found);
+
+    if total_found == 0 {
+        return Ok(ScanResponse {
+            total_found: 0, new_files: 0, duplicates: 0, indexed: 0,
+            needs_ocr: 0, failed: 0, skipped_non_pdf: 0, ocr_success: 0, ocr_failed: 0,
+        });
+    }
+
+    // 获取数据库连接 + 加载去重数据
+    let (conn, existing_hashes, existing_paths) = open_db_and_load_dedup_data(&app)?;
+
+    // Phase 2: 处理 PDF 文件（全盘扫描使用 RegisterOnly）
+    let copy_mode = LocalCopyMode::RegisterOnly;
+    let target_dir = resolve_target_dir(&app, None)?;
+    let (new_files, duplicates, indexed, needs_ocr, failed) = process_pdf_batch(
+        &app, &all_pdf_files, &conn, &index_state,
+        &existing_hashes, &existing_paths, copy_mode, &target_dir,
+    )?;
+
+    info!(
+        "全盘扫描处理完成: 发现 {}, 新增 {}, 重复 {}, 索引 {}, 需OCR {}, 失败 {}",
+        total_found, new_files, duplicates, indexed, needs_ocr, failed
+    );
+
+    // Phase 3: 自动 OCR
+    let (ocr_success, ocr_failed) = if auto_ocr && needs_ocr > 0 {
+        run_auto_ocr(&app, &conn, &index_state, needs_ocr,
+            total_found, new_files, duplicates, indexed, failed)?
+    } else {
+        (0, 0)
+    };
+
+    // 发送最终进度
+    emit_scan_progress(&app, total_found, total_found, new_files, duplicates,
+        indexed, needs_ocr, failed, None, "done",
+        if needs_ocr > 0 { Some(ocr_success + ocr_failed) } else { None },
+        if needs_ocr > 0 { Some(needs_ocr) } else { None });
+
+    info!(
+        "全盘扫描全部完成: 发现 {}, 新增 {}, 索引 {}, OCR成功 {}, OCR失败 {}, 跳过 {}",
+        total_found, new_files, indexed, ocr_success, ocr_failed, duplicates
+    );
+
+    Ok(ScanResponse {
+        total_found, new_files, duplicates, indexed, needs_ocr, failed,
+        skipped_non_pdf: 0, ocr_success, ocr_failed,
     })
 }
 
@@ -1876,18 +2021,7 @@ pub async fn regulation_ocr_pending<R: tauri::Runtime>(
     let batch_size = batch_size.unwrap_or(5);
     info!("开始 OCR 处理待提取文件（Rust 原生），批次大小: {}", batch_size);
 
-    // 获取数据库路径
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("获取应用数据目录失败: {}", e))?;
-    let db_path = app_data_dir.join("history.db");
-
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("打开数据库失败: {}", e))?;
-
-    regulation_db::init_regulation_schema(&conn)
-        .map_err(|e| format!("初始化规章表失败: {}", e))?;
+    let (conn, _, _) = open_db_and_load_dedup_data(&app)?;
 
     // 获取需要 OCR 的文件
     let pending_files = regulation_db::get_pending_ocr_files(&conn, batch_size)
@@ -1910,99 +2044,10 @@ pub async fn regulation_ocr_pending<R: tauri::Runtime>(
     let skipped = 0;
 
     for file in &pending_files {
-        // 更新状态为 processing
-        let _ = regulation_db::update_ocr_status(&conn, file.id, "processing", 0, 0, None);
-
-        // Step 1: 先重试 pdfium 文本提取（有些文件第一次可能因为锁或其他原因失败）
-        let pdf_path = std::path::Path::new(&file.file_path);
-        let extraction = text_extractor::extract_text_from_pdf(pdf_path);
-
-        match extraction {
-            Ok(result) if !result.needs_ocr => {
-                // pdfium 提取成功，直接写入索引
-                let content = result.text;
-                match write_to_index(&index_state, &conn, file, content) {
-                    Ok(()) => {
-                        ocr_success += 1;
-                        info!("pdfium 文本提取重试成功并索引: {}", file.title);
-                    }
-                    Err(e) => {
-                        let _ = regulation_db::update_ocr_status(
-                            &conn, file.id, "failed", 0, 0, Some(&e),
-                        );
-                        ocr_failed += 1;
-                    }
-                }
-            }
-            _ => {
-                // Step 2: pdfium 文本提取不足，使用 Rust 原生 PDF OCR
-                info!("使用 Rust PDF OCR 处理: {}", file.title);
-
-                let app_clone = app.clone();
-                let file_title = file.title.clone();
-
-                match super::pdf_ocr::ocr_pdf(
-                    &file.file_path,
-                    50,
-                    Some(&|current_page, total_pages| {
-                        if let Err(e) = app_clone.emit("regulation:ocr-progress", serde_json::json!({
-                            "current": file_title,
-                            "current_page": current_page,
-                            "total_pages": total_pages,
-                        })) {
-                            tracing::debug!("发送 OCR 页面进度事件失败: {}", e);
-                        }
-                    }),
-                ) {
-                    Ok(ocr_result) if ocr_result.success && !ocr_result.text.is_empty() => {
-                        // OCR 成功，更新页数
-                        if ocr_result.page_count > 0 {
-                            let _ = regulation_db::update_page_count(
-                                &conn, file.id, ocr_result.page_count as i32,
-                            );
-                        }
-
-                        // 写入索引
-                        match write_to_index(&index_state, &conn, file, ocr_result.text) {
-                            Ok(()) => {
-                                ocr_success += 1;
-                                info!(
-                                    "Rust OCR 成功并索引: {} ({}页, OCR {}页, {:.2}s)",
-                                    file.title, ocr_result.page_count,
-                                    ocr_result.ocr_pages, ocr_result.elapsed
-                                );
-                            }
-                            Err(e) => {
-                                let _ = regulation_db::update_ocr_status(
-                                    &conn, file.id, "failed", 0, 0, Some(&e),
-                                );
-                                ocr_failed += 1;
-                            }
-                        }
-                    }
-                    Ok(ocr_result) => {
-                        // OCR 完成但没有文本
-                        let error_msg = if ocr_result.error.is_empty() {
-                            "OCR 未能提取到文本".to_string()
-                        } else {
-                            ocr_result.error
-                        };
-                        let _ = regulation_db::update_ocr_status(
-                            &conn, file.id, "failed", 0, 0, Some(&error_msg),
-                        );
-                        ocr_failed += 1;
-                        warn!("OCR 无文本: {} - {}", file.title, error_msg);
-                    }
-                    Err(e) => {
-                        let error_msg = format!("Rust OCR 失败: {}", e);
-                        let _ = regulation_db::update_ocr_status(
-                            &conn, file.id, "failed", 0, 0, Some(&error_msg),
-                        );
-                        ocr_failed += 1;
-                        warn!("OCR 失败: {} - {}", file.title, e);
-                    }
-                }
-            }
+        if ocr_single_file(&app, &conn, &index_state, file) {
+            ocr_success += 1;
+        } else {
+            ocr_failed += 1;
         }
 
         // 发送进度事件
@@ -2040,16 +2085,7 @@ pub async fn regulation_retry_failed_ocr<R: tauri::Runtime>(
 ) -> Result<OcrProcessResponse, String> {
     info!("开始重试失败的 OCR 文件");
 
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("获取应用数据目录失败: {}", e))?;
-    let db_path = app_data_dir.join("history.db");
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("打开数据库失败: {}", e))?;
-
-    regulation_db::init_regulation_schema(&conn)
-        .map_err(|e| format!("初始化规章表失败: {}", e))?;
+    let (conn, _, _) = open_db_and_load_dedup_data(&app)?;
 
     // 重置 failed → pending
     let reset_count = regulation_db::reset_failed_ocr_files(&conn)
@@ -2307,8 +2343,6 @@ fn commit_batch_to_index(
 // 在线搜索命令（Rust 原生实现，替代 Python Sidecar）
 // ============================================================================
 
-use super::online_search::{CaacOnlineSearcher, OnlineDocument, OnlineSearchRequest, OnlineSearchResponse};
-
 /// 在线搜索规章（Rust 原生，不依赖 Sidecar）
 ///
 /// 直接使用 reqwest + scraper 访问 CAAC 官网搜索页面，
@@ -2398,271 +2432,6 @@ pub async fn regulation_sync_compare_online<R: tauri::Runtime>(
     regulation_sync_compare(app, online_docs).await
 }
 
-// ============================================================================
-// 全盘自动发现规章 PDF 文件
-// ============================================================================
-
-use crate::commands::file_search_cmd::FileSearchState;
-
-/// 民航规章文件名前缀模式
-const REGULATION_PREFIXES: &[&str] = &[
-    "ac-", "ccar-", "ccar ", "ib-", "ap-", "osb-", "wm-",
-    "mh-", "mh/t", "mht", "mh_t", "aac-", "car-",
-    "gb-", "gb/t", "gbt",
-];
-
-/// 判断文件名是否像民航规章文件
-fn is_regulation_filename(name: &str) -> bool {
-    let lower = name.to_lowercase();
-
-    // 必须是 PDF
-    if !lower.ends_with(".pdf") {
-        return false;
-    }
-
-    // 按前缀匹配
-    for prefix in REGULATION_PREFIXES {
-        if lower.starts_with(prefix) || lower.contains(prefix) {
-            return true;
-        }
-    }
-
-    // 文号模式匹配（AC-XXX-XX-XXXX-XX 格式）
-    let doc_number_patterns = [
-        "ac-", "ccar-", "ib-fs-", "ap-", "osb-", "wm-fs-",
-    ];
-    for pattern in doc_number_patterns {
-        if lower.contains(pattern) {
-            return true;
-        }
-    }
-
-    // 中文关键词匹配
-    let cn_keywords = [
-        "规章", "咨询通告", "规范性文件", "飞行标准", "适航",
-        "运行规则", "飞行程序", "飞行校验", "运行合格", "航空承运人",
-        "驾驶员", "机组资源", "全天候", "地面结冰", "飞行数据",
-        "训练大纲", "运行最低标准", "航空器运行", "安全保卫",
-        "危险品运输", "事件信息", "航线运输",
-        "民用航空", "标准规范", "固定电报", "航空气象",
-        "跑道表面", "飞行动态",
-    ];
-    for kw in cn_keywords {
-        if name.contains(kw) {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// 全盘发现规章 PDF 文件
-///
-/// 利用已有的文件搜索索引器（12M+ 文件），自动发现所有民航规章 PDF。
-/// 按文件名模式匹配，无需手动选择目录。
-#[tauri::command]
-pub async fn regulation_discover_local(
-    app: AppHandle,
-    file_search_state: State<'_, FileSearchState>,
-    local_copy_mode: Option<String>,
-    target_dir: Option<String>,
-    index_state: State<'_, RegulationIndexState>,
-) -> Result<serde_json::Value, String> {
-    let copy_mode = LocalCopyMode::from_optional(local_copy_mode.as_deref());
-    let target_dir = resolve_target_dir(&app, target_dir.as_deref())?;
-    info!("开始全盘发现规章 PDF 文件...");
-    let start = std::time::Instant::now();
-
-    let indexer = &file_search_state.indexer;
-
-    // 搜索常见规章前缀 - 使用多种搜索词和更大的限制
-    let search_terms = vec![
-        "AC-", "CCAR-", "CCAR ", "IB-", "AP-", "OSB-", "WM-",
-        "AC-91", "AC-121", "AC-61", "AC-141", "AC-396", "AC-398",
-        "CCAR-121", "CCAR-91", "CCAR-61",
-        "MH-", "MH/T", "MHT", "AAC-", "CAR-",
-        "GB-", "GB/T", "GBT",
-        "飞行程序", "运行规则", "咨询通告", "规范性文件",
-        "飞行标准", "适航", "飞行校验", "运行合格",
-        "驾驶员", "机组资源", "全天候", "地面结冰",
-        "民用航空", "标准规范",
-    ];
-
-    let mut all_paths: Vec<(String, String)> = Vec::new(); // (name, path)
-    let mut seen_paths = std::collections::HashSet::new();
-
-    for term in &search_terms {
-        // 增大限制到 2000，确保不遗漏
-        let results = indexer.search(term, "fuzzy", 2000, 0);
-        for hit in results.hits {
-            if hit.is_directory {
-                continue;
-            }
-            if !is_regulation_filename(&hit.name) {
-                continue;
-            }
-            if seen_paths.insert(hit.path.clone()) {
-                all_paths.push((hit.name.clone(), hit.path.clone()));
-            }
-        }
-    }
-
-    // 补充：直接搜索 .pdf 扩展名，捕获可能遗漏的文件
-    let pdf_results = indexer.search(".pdf", "fuzzy", 5000, 0);
-    for hit in pdf_results.hits {
-        if hit.is_directory {
-            continue;
-        }
-        if !is_regulation_filename(&hit.name) {
-            continue;
-        }
-        if seen_paths.insert(hit.path.clone()) {
-            all_paths.push((hit.name.clone(), hit.path.clone()));
-        }
-    }
-
-    info!("全盘发现完成：找到 {} 个规章 PDF 文件", all_paths.len());
-
-    // 获取数据库连接，准备导入
-    let app_data_dir = app.path().app_data_dir()
-        .map_err(|e| format!("获取应用数据目录失败: {}", e))?;
-    let db_path = app_data_dir.join("history.db");
-    let conn = rusqlite::Connection::open(&db_path)
-        .map_err(|e| format!("打开数据库失败: {}", e))?;
-    regulation_db::init_regulation_schema(&conn)
-        .map_err(|e| format!("初始化规章表失败: {}", e))?;
-
-    // 加载已有路径用于去重
-    let existing_paths: std::collections::HashSet<String> = {
-        let mut stmt = conn.prepare("SELECT file_path FROM regulation_files")
-            .map_err(|e| format!("查询失败: {}", e))?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| format!("读取失败: {}", e))?;
-        let result: std::collections::HashSet<String> = rows
-            .filter_map(|r| r.ok())
-            .collect();
-        result
-    };
-
-    let mut new_count = 0;
-    let mut skip_count = 0;
-    let mut indexed_count = 0;
-
-    // 获取索引引用
-    let index_guard = index_state.index.lock()
-        .map_err(|e| format!("锁定索引失败: {}", e))?;
-
-    for (name, path) in &all_paths {
-        // register_only 模式才按路径判重
-        if copy_mode == LocalCopyMode::RegisterOnly && existing_paths.contains(path) {
-            skip_count += 1;
-            continue;
-        }
-
-        // 从文件名提取标题（去掉扩展名和常见前缀）
-        let title = name
-            .trim_end_matches(".pdf")
-            .trim_end_matches(".PDF")
-            .to_string();
-
-        // 生成唯一 URL（用本地路径作为标识）
-        let url = format!("local://{}", path);
-
-        // 计算文件哈希
-        let sha256 = match super::sync::calculate_file_hash(std::path::Path::new(path)) {
-            Ok(hash) => hash,
-            Err(_) => {
-                continue; // 无法读取文件，跳过
-            }
-        };
-
-        // 计算导入后的存储路径
-        let source_path = Path::new(path);
-        let stored_path = match resolve_storage_path(source_path, &sha256, copy_mode, &target_dir) {
-            Ok(path) => path,
-            Err(e) => {
-                debug!("复制文件失败: {} - {}", name, e);
-                continue;
-            }
-        };
-        let stored_path_str = stored_path.to_string_lossy().to_string();
-
-        // 插入数据库
-        let file = regulation_db::RegulationFile {
-            id: 0,
-            title: title.clone(),
-            doc_number: String::new(),
-            doc_type: "local".to_string(),
-            url: url.clone(),
-            pdf_url: None,
-            sha256,
-            file_path: stored_path_str.clone(),
-            file_size: std::fs::metadata(&stored_path).map(|m| m.len() as i64).unwrap_or(0),
-            page_count: 0,
-            ocr_status: "pending".to_string(),
-            ocr_progress: 0,
-            ocr_current_page: 0,
-            ocr_error: None,
-            indexed: false,
-            indexed_at: None,
-            created_at: String::new(),
-            updated_at: String::new(),
-        };
-
-        match regulation_db::insert_file(&conn, &file) {
-            Ok(_) => {
-                new_count += 1;
-
-                // 同时添加到 tantivy 索引（仅文件名）
-                if let Some(ref index) = *index_guard {
-                    let doc = RegulationDocument {
-                        title: title.clone(),
-                        doc_number: String::new(),
-                        validity: String::new(),
-                        doc_type: "local".to_string(),
-                        office_unit: String::new(),
-                        sign_date: String::new(),
-                        publish_date: String::new(),
-                        url: url.clone(),
-                        file_path: stored_path_str.clone(),
-                        content: String::new(),
-                    };
-                    if index.add_document(&doc).is_ok() {
-                        indexed_count += 1;
-                    }
-                }
-            }
-            Err(e) => {
-                debug!("插入文件记录失败: {} - {}", name, e);
-            }
-        }
-    }
-
-    // 提交索引
-    if indexed_count > 0 {
-        if let Some(ref index) = *index_guard {
-            let _ = index.commit();
-        }
-    }
-
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-
-    info!(
-        "全盘发现完成: 发现 {}, 新增 {}, 已存在 {}, 已索引 {}, 耗时 {}ms",
-        all_paths.len(), new_count, skip_count, indexed_count, elapsed_ms
-    );
-
-    Ok(serde_json::json!({
-        "found": all_paths.len(),
-        "newAdded": new_count,
-        "skipped": skip_count,
-        "indexed": indexed_count,
-        "elapsedMs": elapsed_ms,
-        "total_found": all_paths.len(),
-        "new_added": new_count,
-        "elapsed_ms": elapsed_ms
-    }))
-}
 
 #[derive(Debug, Deserialize)]
 pub struct LegacyImportRequest {

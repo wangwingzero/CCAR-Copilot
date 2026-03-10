@@ -1,5 +1,6 @@
 /**
  * 服务模块导出
+ *
+ * 预留模块：用于封装可复用的业务服务（如 API 调用、数据转换等）。
+ * 当前项目的服务逻辑主要在 composables 和 stores 中实现。
  */
-
-export * from './exportService'

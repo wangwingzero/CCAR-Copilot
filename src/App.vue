@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import ErrorBoundary from '@/components/ErrorBoundary.vue'
 import RegulationSearchPanel from '@/components/regulation/RegulationSearchPanel.vue'
 </script>
 
 <template>
   <main class="app-root">
-    <RegulationSearchPanel />
+    <ErrorBoundary>
+      <RegulationSearchPanel />
+    </ErrorBoundary>
   </main>
 </template>
 

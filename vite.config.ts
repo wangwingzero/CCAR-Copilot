@@ -21,14 +21,6 @@ export default defineConfig(async () => ({
     rollupOptions: {
       input: {
         main: resolve(__dirname, "index.html"),
-        overlay: resolve(__dirname, "overlay.html"),
-        pin: resolve(__dirname, "pin.html"),
-        workbench: resolve(__dirname, "workbench.html"),
-        mouseHighlight: resolve(__dirname, "mouse-highlight-overlay.html"),
-        ocrResult: resolve(__dirname, "ocr-result.html"),
-        recordingControl: resolve(__dirname, "recording-control.html"),
-        recordingPreview: resolve(__dirname, "recording-preview.html"),
-        ankiCard: resolve(__dirname, "anki-card.html"),
       },
     },
   },
@@ -39,7 +31,7 @@ export default defineConfig(async () => ({
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: 1420,
+    port: 1430,
     strictPort: true,
     host: host || false,
     hmr: host

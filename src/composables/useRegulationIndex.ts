@@ -26,6 +26,7 @@ interface RegulationSearchResponse {
   documents: RegulationDocument[]
   total: number
   elapsed_ms: number
+  snippets?: (string | null)[]
 }
 
 interface RegulationIndexStats {
@@ -47,6 +48,9 @@ const searchResults = ref<RegulationDocument[]>([])
 const searchElapsedMs = ref(0)
 const lastError = ref<string | null>(null)
 
+/** 摘要映射（按 doc.url → snippet） */
+const snippetMap = ref<Map<string, string>>(new Map())
+
 /**
  * 规章本地索引 Composable
  */
@@ -66,7 +70,7 @@ export function useRegulationIndex() {
       const stats = await invoke<RegulationIndexStats>('regulation_index_init')
       indexStats.value = stats
       isInitialized.value = stats.initialized
-      console.log(`[RegulationIndex] 初始化完成，文档数: ${stats.doc_count}`)
+      console.warn(`[RegulationIndex] 初始化完成，文档数: ${stats.doc_count}`)
       return true
     } catch (error) {
       lastError.value = String(error)
@@ -117,7 +121,19 @@ export function useRegulationIndex() {
       searchResults.value = response.documents
       searchElapsedMs.value = response.elapsed_ms
 
-      console.log(
+      // 构建摘要映射
+      const newMap = new Map<string, string>()
+      if (response.snippets) {
+        response.documents.forEach((doc, i) => {
+          const snippet = response.snippets![i]
+          if (snippet) {
+            newMap.set(doc.url, snippet)
+          }
+        })
+      }
+      snippetMap.value = newMap
+
+      console.warn(
         `[RegulationIndex] 搜索 "${query}" 返回 ${response.total} 条结果，耗时 ${response.elapsed_ms}ms`
       )
 
@@ -230,6 +246,7 @@ export function useRegulationIndex() {
     searchElapsedMs: computed(() => searchElapsedMs.value),
     lastError: computed(() => lastError.value),
     docCount: computed(() => indexStats.value?.doc_count ?? 0),
+    snippetMap: computed(() => snippetMap.value),
 
     // 方法
     initIndex,

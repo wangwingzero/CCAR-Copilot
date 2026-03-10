@@ -67,7 +67,6 @@
 //! - 更低的内存占用
 //! - 更好的错误处理
 
-pub mod background_cache;
 pub mod config;
 pub mod detector;
 pub mod engine;
@@ -80,7 +79,6 @@ pub mod recognizer;
 pub mod types;
 
 // 重新导出常用类型
-pub use background_cache::BackgroundOcrCache;
 pub use config::OcrConfig;
 pub use detector::TextDetector;
 pub use engine::OcrEngine;

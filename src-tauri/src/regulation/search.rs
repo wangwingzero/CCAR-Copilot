@@ -37,29 +37,31 @@ pub fn sort_results(results: &mut [RegulationDocument], order: SortOrder) {
 
 /// 高亮搜索关键词
 ///
-/// 在文本中用 `<mark>` 标签包裹匹配的关键词
-#[allow(dead_code)]
+/// 在文本中用 `<mark>` 标签包裹匹配的关键词。
+/// 先对文本进行 HTML 转义，再插入标记标签，防止 XSS。
 pub fn highlight_keywords(text: &str, keywords: &[&str]) -> String {
-    let mut result = text.to_string();
+    // 先 HTML 转义原始文本，防止注入
+    let mut result = html_escape(text);
 
     for keyword in keywords {
         if keyword.is_empty() {
             continue;
         }
 
-        // 简单的大小写不敏感替换
+        // 关键词也需要转义后再匹配
+        let escaped_keyword = html_escape(keyword);
         let lower_text = result.to_lowercase();
-        let lower_keyword = keyword.to_lowercase();
+        let lower_keyword = escaped_keyword.to_lowercase();
 
         let mut new_result = String::with_capacity(result.len() + 20);
         let mut last_end = 0;
 
-        for (start, _) in lower_text.match_indices(&lower_keyword) {
+        for (start, matched) in lower_text.match_indices(&lower_keyword) {
             new_result.push_str(&result[last_end..start]);
             new_result.push_str("<mark>");
-            new_result.push_str(&result[start..start + keyword.len()]);
+            new_result.push_str(&result[start..start + matched.len()]);
             new_result.push_str("</mark>");
-            last_end = start + keyword.len();
+            last_end = start + matched.len();
         }
 
         new_result.push_str(&result[last_end..]);
@@ -69,21 +71,28 @@ pub fn highlight_keywords(text: &str, keywords: &[&str]) -> String {
     result
 }
 
+/// HTML 转义，防止 XSS 注入
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 /// 提取搜索关键词
 ///
 /// 从查询字符串中提取关键词列表
-#[allow(dead_code)]
 pub fn extract_keywords(query: &str) -> Vec<&str> {
     query
         .split_whitespace()
-        .filter(|s| !s.is_empty() && s.len() > 1)
+        .filter(|s| !s.is_empty() && s.chars().count() > 1)
         .collect()
 }
 
 /// 计算文本摘要
 ///
 /// 提取包含关键词的文本片段作为摘要
-#[allow(dead_code)]
 pub fn extract_snippet(content: &str, keywords: &[&str], max_length: usize) -> String {
     if content.is_empty() {
         return String::new();
@@ -124,6 +133,34 @@ pub fn extract_snippet(content: &str, keywords: &[&str], max_length: usize) -> S
     snippet
 }
 
+/// 为搜索结果批量生成摘要
+///
+/// 对每条结果提取正文摘要并高亮关键词。
+/// 返回与 `results` 等长的 `Vec<Option<String>>`，
+/// 正文为空时对应位置为 `None`。
+pub fn generate_snippets(
+    results: &[RegulationDocument],
+    query: &str,
+    max_len: usize,
+) -> Vec<Option<String>> {
+    let keywords = extract_keywords(query);
+    results
+        .iter()
+        .map(|doc| {
+            if doc.content.is_empty() {
+                None
+            } else {
+                let snippet = extract_snippet(&doc.content, &keywords, max_len);
+                if snippet.is_empty() {
+                    None
+                } else {
+                    Some(highlight_keywords(&snippet, &keywords))
+                }
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +171,16 @@ mod tests {
         let result = highlight_keywords(text, &["飞机", "运输"]);
         assert!(result.contains("<mark>飞机</mark>"));
         assert!(result.contains("<mark>运输</mark>"));
+    }
+
+    #[test]
+    fn test_highlight_keywords_xss_prevention() {
+        let text = "<script>alert('xss')</script>飞机测试";
+        let result = highlight_keywords(text, &["飞机"]);
+        // 应该转义 HTML 标签
+        assert!(!result.contains("<script>"));
+        assert!(result.contains("&lt;script&gt;"));
+        assert!(result.contains("<mark>飞机</mark>"));
     }
 
     #[test]

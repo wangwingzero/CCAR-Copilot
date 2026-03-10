@@ -10,18 +10,17 @@ use crate::tray::{self, TrayState, TrayStateManager};
 /// 设置托盘状态
 ///
 /// # Arguments
-/// * `state` - 状态字符串: "idle", "recording", "processing"
+/// * `state` - 状态字符串: "idle", "processing"
 #[tauri::command]
 pub async fn set_tray_state(app: AppHandle<Wry>, state: String) -> Result<(), String> {
     let tray_state = match state.as_str() {
         "idle" => TrayState::Idle,
-        "recording" => TrayState::Recording,
         "processing" => TrayState::Processing,
         _ => {
             return Err(format!("未知的托盘状态: {}", state));
         }
     };
-    
+
     tray::set_tray_state(&app, tray_state)
 }
 
@@ -46,7 +45,6 @@ pub async fn get_tray_state(app: AppHandle<Wry>) -> Result<String, String> {
         let state = state_manager.get_state();
         let state_str = match state {
             TrayState::Idle => "idle",
-            TrayState::Recording => "recording",
             TrayState::Processing => "processing",
         };
         Ok(state_str.to_string())

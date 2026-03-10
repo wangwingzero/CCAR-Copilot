@@ -118,7 +118,7 @@ export const useRegulationStore = defineStore('regulation', () => {
 
       scanResult.value = result
 
-      console.log(
+      console.warn(
         `[RegulationStore] 扫描完成: 发现 ${result.total_found}, 新增 ${result.new_files}, 重复 ${result.duplicates}, 索引 ${result.indexed}`,
       )
 
@@ -130,6 +130,55 @@ export const useRegulationStore = defineStore('regulation', () => {
     } finally {
       isScanning.value = false
       // 清理事件监听
+      if (scanProgressUnlisten) {
+        scanProgressUnlisten()
+        scanProgressUnlisten = null
+      }
+    }
+  }
+
+  /**
+   * 开始全盘扫描所有 PDF 文件
+   *
+   * 遍历 Windows 所有盘符，递归收集 PDF 并入库索引。
+   */
+  async function startFullScan(
+    initIndexFn?: () => Promise<void>,
+  ): Promise<RegulationScanResponse | null> {
+    if (isScanning.value) {
+      return null
+    }
+
+    try {
+      isScanning.value = true
+      scanProgress.value = null
+      scanResult.value = null
+      scanError.value = null
+
+      if (initIndexFn) {
+        await initIndexFn()
+      }
+
+      scanProgressUnlisten = await listen<RegulationScanProgress>(
+        'regulation:scan-progress',
+        (event) => {
+          scanProgress.value = event.payload
+        },
+      )
+
+      const result = await invoke<RegulationScanResponse>(
+        'regulation_scan_all_drives',
+        { autoOcr: true },
+      )
+
+      scanResult.value = result
+      return result
+    } catch (err) {
+      scanError.value = err instanceof Error ? err.message : String(err)
+      console.error('[RegulationStore] 全盘扫描失败:', err)
+      return null
+    } finally {
+      isScanning.value = false
       if (scanProgressUnlisten) {
         scanProgressUnlisten()
         scanProgressUnlisten = null
@@ -205,6 +254,7 @@ export const useRegulationStore = defineStore('regulation', () => {
 
     // Methods
     startScan,
+    startFullScan,
     startSyncCompare,
     finishSyncCompare,
     refreshDbStatus,

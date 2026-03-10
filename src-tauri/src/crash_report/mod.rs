@@ -103,8 +103,8 @@ impl SystemInfo {
             os: std::env::consts::OS.to_string(),
             os_version: get_os_version(),
             arch: std::env::consts::ARCH.to_string(),
-            hostname: hostname::get()
-                .map(|h| h.to_string_lossy().to_string())
+            hostname: std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "unknown".to_string()),
             cwd: std::env::current_dir()
                 .map(|p| p.display().to_string())

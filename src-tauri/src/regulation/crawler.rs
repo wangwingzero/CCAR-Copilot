@@ -269,12 +269,11 @@ pub struct DownloadItem {
 #[allow(dead_code)]
 pub fn extract_pdf_url(detail_url: &str, html: &str) -> Option<String> {
     // CAAC 官网的 PDF 链接通常在 <a href="...pdf"> 标签中
-    // 简单的正则匹配
     use regex::Regex;
+    use std::sync::LazyLock;
 
-    lazy_static::lazy_static! {
-        static ref PDF_REGEX: Regex = Regex::new(r#"href="([^"]+\.pdf)""#).unwrap();
-    }
+    static PDF_REGEX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"href="([^"]+\.pdf)""#).expect("PDF_REGEX pattern invalid"));
 
     PDF_REGEX.captures(html).and_then(|cap| {
         let pdf_path = cap.get(1).unwrap().as_str();

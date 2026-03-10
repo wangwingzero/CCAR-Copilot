@@ -4,7 +4,6 @@
 
 export { default as SettingsPanel } from './SettingsPanel.vue'
 export { default as SettingsSidebar } from './SettingsSidebar.vue'
-export { default as HotkeyInput } from './HotkeyInput.vue'
 
 // Control components
 export { default as SettingsGroup } from './controls/SettingsGroup.vue'

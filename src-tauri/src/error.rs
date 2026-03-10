@@ -6,27 +6,11 @@
 use serde::Serialize;
 use thiserror::Error;
 
-/// 虎哥截图统一错误类型
+/// CCAR Copilot 统一错误类型
 ///
 /// 所有模块的错误都应该转换为此类型，以便统一处理和序列化到前端。
 #[derive(Debug, Error)]
 pub enum HuGeError {
-    /// 截图捕获失败
-    #[error("截图捕获失败: {0}")]
-    CaptureError(String),
-
-    /// 热键注册失败
-    #[error("热键注册失败: {0}")]
-    HotkeyError(String),
-
-    /// 窗口操作失败
-    #[error("窗口操作失败: {0}")]
-    WindowError(String),
-
-    /// Sidecar 通信失败
-    #[error("Sidecar 通信失败: {0}")]
-    SidecarError(String),
-
     /// OCR 识别错误
     #[error("OCR 识别错误: {0}")]
     OcrError(String),
@@ -99,15 +83,15 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = HuGeError::CaptureError("屏幕捕获超时".to_string());
-        assert_eq!(err.to_string(), "截图捕获失败: 屏幕捕获超时");
+        let err = HuGeError::OcrError("模型加载失败".to_string());
+        assert_eq!(err.to_string(), "OCR 识别错误: 模型加载失败");
     }
 
     #[test]
     fn test_error_serialize() {
-        let err = HuGeError::HotkeyError("Ctrl+Shift+A 已被占用".to_string());
+        let err = HuGeError::ConfigError("配置文件损坏".to_string());
         let json = serde_json::to_string(&err).unwrap();
-        assert_eq!(json, "\"热键注册失败: Ctrl+Shift+A 已被占用\"");
+        assert_eq!(json, "\"配置错误: 配置文件损坏\"");
     }
 
     #[test]

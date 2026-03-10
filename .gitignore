@@ -69,3 +69,4 @@ temp/
 *.dmg
 *.AppImage
 .ace-tool/
+nul

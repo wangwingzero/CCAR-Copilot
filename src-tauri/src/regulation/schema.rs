@@ -74,8 +74,8 @@ impl RegulationFields {
         // 本地文件路径：仅存储
         let file_path = schema_builder.add_text_field("file_path", STORED);
 
-        // PDF 正文：全文索引（不存储，节省空间）
-        let content = schema_builder.add_text_field("content", TEXT);
+        // PDF 正文：全文索引 + 存储（用于生成搜索摘要）
+        let content = schema_builder.add_text_field("content", TEXT | STORED);
 
         let schema = schema_builder.build();
         let fields = Self {
@@ -116,7 +116,7 @@ impl RegulationDocument {
             publish_date: get_text(fields.publish_date),
             url: get_text(fields.url),
             file_path: get_text(fields.file_path),
-            content: String::new(), // 不存储正文
+            content: get_text(fields.content), // 从索引中取回正文
         }
     }
 
