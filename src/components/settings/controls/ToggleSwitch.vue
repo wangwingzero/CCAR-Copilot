@@ -1,24 +1,3 @@
-<template>
-  <button
-    type="button"
-    role="switch"
-    class="toggle-switch"
-    :class="{ 'is-on': modelValue, 'is-disabled': disabled }"
-    :aria-checked="modelValue"
-    :aria-label="ariaLabel"
-    :aria-disabled="disabled"
-    :disabled="disabled"
-    :tabindex="disabled ? -1 : 0"
-    @click="handleToggle"
-    @keydown.space.prevent="handleToggle"
-    @keydown.enter.prevent="handleToggle"
-  >
-    <span class="toggle-track">
-      <span class="toggle-thumb"></span>
-    </span>
-  </button>
-</template>
-
 <script setup lang="ts">
 /**
  * ToggleSwitch - Boolean toggle control
@@ -59,6 +38,27 @@ function handleToggle() {
   emit('update:modelValue', !props.modelValue)
 }
 </script>
+
+<template>
+  <button
+    type="button"
+    role="switch"
+    class="toggle-switch"
+    :class="{ 'is-on': modelValue, 'is-disabled': disabled }"
+    :aria-checked="modelValue"
+    :aria-label="ariaLabel"
+    :aria-disabled="disabled"
+    :disabled="disabled"
+    :tabindex="disabled ? -1 : 0"
+    @click="handleToggle"
+    @keydown.space.prevent="handleToggle"
+    @keydown.enter.prevent="handleToggle"
+  >
+    <span class="toggle-track">
+      <span class="toggle-thumb"></span>
+    </span>
+  </button>
+</template>
 
 <style scoped>
 .toggle-switch {

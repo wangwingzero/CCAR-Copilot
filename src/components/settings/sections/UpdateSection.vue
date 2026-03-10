@@ -1,84 +1,3 @@
-<template>
-  <div class="update-section">
-    <SettingsGroup :title="$t('settings.update.title')">
-      <!-- Auto Check Toggle -->
-      <SettingItem
-        :label="$t('settings.update.autoCheck')"
-        :help-text="$t('settings.update.autoCheckHelp')"
-      >
-        <ToggleSwitch
-          :model-value="updateConfig.autoCheck"
-          :aria-label="$t('settings.update.autoCheck')"
-          @update:model-value="handleAutoCheckChange"
-        />
-      </SettingItem>
-
-      <!-- Check Interval Slider -->
-      <SettingItem
-        v-show="updateConfig.autoCheck"
-        :label="$t('settings.update.checkInterval')"
-        :help-text="$t('settings.update.checkIntervalHelp')"
-      >
-        <SliderControl
-          :model-value="updateConfig.checkIntervalHours"
-          :min="1"
-          :max="168"
-          :step="1"
-          suffix="h"
-          @update:model-value="handleCheckIntervalChange"
-        />
-      </SettingItem>
-
-      <!-- Use Proxy Toggle -->
-      <SettingItem
-        :label="$t('settings.update.useProxy')"
-        :help-text="$t('settings.update.useProxyHelp')"
-      >
-        <ToggleSwitch
-          :model-value="updateConfig.useProxy"
-          :aria-label="$t('settings.update.useProxy')"
-          @update:model-value="handleUseProxyChange"
-        />
-      </SettingItem>
-
-      <!-- Proxy URL Input (conditional) -->
-      <SettingItem
-        v-show="updateConfig.useProxy"
-        :label="$t('settings.update.proxyUrl')"
-        :help-text="$t('settings.update.proxyUrlHelp')"
-      >
-        <input
-          :value="updateConfig.proxyUrl"
-          type="text"
-          class="setting-input"
-          placeholder="https://ghproxy.net/"
-          @input="handleProxyUrlInput"
-          @change="handleProxyUrlChange"
-        />
-      </SettingItem>
-
-      <!-- Check Now Button -->
-      <SettingItem :label="$t('settings.update.checkNow')">
-        <button
-          class="check-now-btn"
-          :disabled="isChecking"
-          @click="handleCheckNow"
-        >
-          {{ isChecking ? $t('settings.update.checking') : $t('settings.update.checkNowBtn') }}
-        </button>
-      </SettingItem>
-
-      <!-- Last Check Time -->
-      <SettingItem
-        v-if="updateConfig.lastCheckTime"
-        :label="$t('settings.update.lastCheck')"
-      >
-        <span class="last-check-time">{{ formatLastCheckTime }}</span>
-      </SettingItem>
-    </SettingsGroup>
-  </div>
-</template>
-
 <script setup lang="ts">
 /**
  * UpdateSection - Update Settings Section
@@ -216,6 +135,87 @@ async function handleCheckNow(): Promise<void> {
 }
 </script>
 
+<template>
+  <div class="update-section">
+    <SettingsGroup :title="$t('settings.update.title')">
+      <!-- Auto Check Toggle -->
+      <SettingItem
+        :label="$t('settings.update.autoCheck')"
+        :help-text="$t('settings.update.autoCheckHelp')"
+      >
+        <ToggleSwitch
+          :model-value="updateConfig.autoCheck"
+          :aria-label="$t('settings.update.autoCheck')"
+          @update:model-value="handleAutoCheckChange"
+        />
+      </SettingItem>
+
+      <!-- Check Interval Slider -->
+      <SettingItem
+        v-show="updateConfig.autoCheck"
+        :label="$t('settings.update.checkInterval')"
+        :help-text="$t('settings.update.checkIntervalHelp')"
+      >
+        <SliderControl
+          :model-value="updateConfig.checkIntervalHours"
+          :min="1"
+          :max="168"
+          :step="1"
+          suffix="h"
+          @update:model-value="handleCheckIntervalChange"
+        />
+      </SettingItem>
+
+      <!-- Use Proxy Toggle -->
+      <SettingItem
+        :label="$t('settings.update.useProxy')"
+        :help-text="$t('settings.update.useProxyHelp')"
+      >
+        <ToggleSwitch
+          :model-value="updateConfig.useProxy"
+          :aria-label="$t('settings.update.useProxy')"
+          @update:model-value="handleUseProxyChange"
+        />
+      </SettingItem>
+
+      <!-- Proxy URL Input (conditional) -->
+      <SettingItem
+        v-show="updateConfig.useProxy"
+        :label="$t('settings.update.proxyUrl')"
+        :help-text="$t('settings.update.proxyUrlHelp')"
+      >
+        <input
+          :value="updateConfig.proxyUrl"
+          type="text"
+          class="setting-input"
+          placeholder="https://ghproxy.net/"
+          @input="handleProxyUrlInput"
+          @change="handleProxyUrlChange"
+        />
+      </SettingItem>
+
+      <!-- Check Now Button -->
+      <SettingItem :label="$t('settings.update.checkNow')">
+        <button
+          class="check-now-btn"
+          :disabled="isChecking"
+          @click="handleCheckNow"
+        >
+          {{ isChecking ? $t('settings.update.checking') : $t('settings.update.checkNowBtn') }}
+        </button>
+      </SettingItem>
+
+      <!-- Last Check Time -->
+      <SettingItem
+        v-if="updateConfig.lastCheckTime"
+        :label="$t('settings.update.lastCheck')"
+      >
+        <span class="last-check-time">{{ formatLastCheckTime }}</span>
+      </SettingItem>
+    </SettingsGroup>
+  </div>
+</template>
+
 <style scoped>
 .update-section {
   /* Section container - inherits dark theme from parent */
@@ -224,35 +224,35 @@ async function handleCheckNow(): Promise<void> {
 .setting-input {
   width: 200px;
   padding: 6px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--color-border, #38383a);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--color-input-bg, rgba(118, 118, 128, 0.24));
+  color: var(--color-text-primary, #fff);
   font-size: 13px;
 }
 
 .setting-input:focus {
   outline: none;
-  border-color: #4285f4;
+  border-color: var(--color-accent, #0a84ff);
 }
 
 .setting-input::placeholder {
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--color-text-tertiary, #ebebf54d);
 }
 
 .check-now-btn {
   padding: 6px 16px;
   border: none;
-  border-radius: 4px;
-  background: #4285f4;
+  border-radius: var(--radius-sm, 6px);
+  background: var(--color-accent, #0a84ff);
   color: white;
   font-size: 13px;
   cursor: pointer;
-  transition: background-color 0.1s;
+  transition: background-color var(--transition-fast, 0.15s);
 }
 
 .check-now-btn:hover:not(:disabled) {
-  background: #5a9cf5;
+  background: var(--color-accent-hover, #409cff);
 }
 
 .check-now-btn:disabled {
@@ -261,7 +261,7 @@ async function handleCheckNow(): Promise<void> {
 }
 
 .last-check-time {
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--color-text-secondary, #ebebf599);
   font-size: 12px;
 }
 </style>

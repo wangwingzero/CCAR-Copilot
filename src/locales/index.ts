@@ -13,6 +13,7 @@ import type { I18n, Composer, VueI18n } from 'vue-i18n'
 import zhCN from './zh-CN'
 
 // 语言消息（英文包在需要时懒加载）
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const messages: Record<string, any> = {
   'zh-CN': zhCN,
 }

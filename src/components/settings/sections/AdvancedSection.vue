@@ -1,133 +1,3 @@
-<template>
-  <div class="advanced-section">
-    <!-- Proxy Configuration Group -->
-    <SettingsGroup :title="$t('settings.advanced.proxy')">
-      <!-- Proxy Enabled Toggle -->
-      <SettingItem
-        :label="$t('settings.advanced.proxyEnabled')"
-        :help-text="$t('settings.advanced.proxyEnabledHelp')"
-      >
-        <ToggleSwitch
-          :model-value="advancedConfig.proxyEnabled"
-          :aria-label="$t('settings.advanced.proxyEnabled')"
-          @update:model-value="handleProxyEnabledChange"
-        />
-      </SettingItem>
-
-      <!-- Proxy Type Selector -->
-      <SettingItem
-        v-show="advancedConfig.proxyEnabled"
-        :label="$t('settings.advanced.proxyType')"
-      >
-        <select
-          :value="advancedConfig.proxyType"
-          class="setting-select"
-          @change="handleProxyTypeChange"
-        >
-          <option value="http">HTTP</option>
-          <option value="socks5">SOCKS5</option>
-        </select>
-      </SettingItem>
-
-      <!-- Proxy Host Input -->
-      <SettingItem
-        v-show="advancedConfig.proxyEnabled"
-        :label="$t('settings.advanced.proxyHost')"
-      >
-        <input
-          :value="advancedConfig.proxyHost"
-          type="text"
-          class="setting-input"
-          placeholder="127.0.0.1"
-          @input="handleProxyHostInput"
-        />
-      </SettingItem>
-
-      <!-- Proxy Port Input -->
-      <SettingItem
-        v-show="advancedConfig.proxyEnabled"
-        :label="$t('settings.advanced.proxyPort')"
-      >
-        <input
-          :value="advancedConfig.proxyPort"
-          type="number"
-          class="setting-input port-input"
-          min="1"
-          max="65535"
-          placeholder="8080"
-          @input="handleProxyPortInput"
-        />
-      </SettingItem>
-    </SettingsGroup>
-
-    <!-- Debug Logging Group -->
-    <SettingsGroup :title="$t('settings.advanced.debugging')">
-      <!-- Debug Logging Toggle -->
-      <SettingItem
-        :label="$t('settings.advanced.debugLogging')"
-        :help-text="$t('settings.advanced.debugLoggingHelp')"
-      >
-        <ToggleSwitch
-          :model-value="advancedConfig.debugLogging"
-          :aria-label="$t('settings.advanced.debugLogging')"
-          @update:model-value="handleDebugLoggingChange"
-        />
-      </SettingItem>
-
-      <!-- Debug Log Path -->
-      <SettingItem
-        v-show="advancedConfig.debugLogging"
-        :label="$t('settings.advanced.debugLogPath')"
-      >
-        <div class="path-input">
-          <input
-            :value="advancedConfig.debugLogPath"
-            type="text"
-            class="setting-input path-text"
-            readonly
-          />
-          <button class="browse-btn" @click="handleBrowseLogPath">
-            {{ $t('settings.browse') }}
-          </button>
-        </div>
-      </SettingItem>
-    </SettingsGroup>
-
-    <!-- Data Management Group -->
-    <SettingsGroup :title="$t('settings.advanced.dataManagement')">
-      <!-- Portable Mode Toggle -->
-      <SettingItem
-        :label="$t('settings.advanced.portableMode')"
-        :help-text="$t('settings.advanced.portableModeHelp')"
-      >
-        <ToggleSwitch
-          :model-value="advancedConfig.portableMode"
-          :aria-label="$t('settings.advanced.portableMode')"
-          @update:model-value="handlePortableModeChange"
-        />
-      </SettingItem>
-
-      <!-- Portable Mode Warning -->
-      <div v-if="showPortableWarning" class="warning-message">
-        <span class="warning-icon">⚠️</span>
-        <span class="warning-text">{{ $t('settings.advanced.portableModeWarning') }}</span>
-      </div>
-
-      <!-- Import/Export Buttons -->
-      <SettingItem :label="$t('settings.advanced.importExport')">
-        <div class="button-group">
-          <button class="action-btn" @click="handleImport">
-            {{ $t('settings.advanced.import') }}
-          </button>
-          <button class="action-btn" @click="handleExport">
-            {{ $t('settings.advanced.export') }}
-          </button>
-        </div>
-      </SettingItem>
-    </SettingsGroup>
-  </div>
-</template>
-
 <script setup lang="ts">
 /**
  * AdvancedSection - Advanced Settings Section
@@ -286,8 +156,8 @@ async function handleImport(): Promise<void> {
   })
 
   if (selected && typeof selected === 'string') {
-    // TODO: Implement import logic
-    console.log('Import from:', selected)
+    // TODO: 实现导入逻辑
+    console.warn('[Settings] Import from:', selected)
   }
 }
 
@@ -302,11 +172,141 @@ async function handleExport(): Promise<void> {
   })
 
   if (selected) {
-    // TODO: Implement export logic
-    console.log('Export to:', selected)
+    // TODO: 实现导出逻辑
+    console.warn('[Settings] Export to:', selected)
   }
 }
 </script>
+
+<template>
+  <div class="advanced-section">
+    <!-- Proxy Configuration Group -->
+    <SettingsGroup :title="$t('settings.advanced.proxy')">
+      <!-- Proxy Enabled Toggle -->
+      <SettingItem
+        :label="$t('settings.advanced.proxyEnabled')"
+        :help-text="$t('settings.advanced.proxyEnabledHelp')"
+      >
+        <ToggleSwitch
+          :model-value="advancedConfig.proxyEnabled"
+          :aria-label="$t('settings.advanced.proxyEnabled')"
+          @update:model-value="handleProxyEnabledChange"
+        />
+      </SettingItem>
+
+      <!-- Proxy Type Selector -->
+      <SettingItem
+        v-show="advancedConfig.proxyEnabled"
+        :label="$t('settings.advanced.proxyType')"
+      >
+        <select
+          :value="advancedConfig.proxyType"
+          class="setting-select"
+          @change="handleProxyTypeChange"
+        >
+          <option value="http">HTTP</option>
+          <option value="socks5">SOCKS5</option>
+        </select>
+      </SettingItem>
+
+      <!-- Proxy Host Input -->
+      <SettingItem
+        v-show="advancedConfig.proxyEnabled"
+        :label="$t('settings.advanced.proxyHost')"
+      >
+        <input
+          :value="advancedConfig.proxyHost"
+          type="text"
+          class="setting-input"
+          placeholder="127.0.0.1"
+          @input="handleProxyHostInput"
+        />
+      </SettingItem>
+
+      <!-- Proxy Port Input -->
+      <SettingItem
+        v-show="advancedConfig.proxyEnabled"
+        :label="$t('settings.advanced.proxyPort')"
+      >
+        <input
+          :value="advancedConfig.proxyPort"
+          type="number"
+          class="setting-input port-input"
+          min="1"
+          max="65535"
+          placeholder="8080"
+          @input="handleProxyPortInput"
+        />
+      </SettingItem>
+    </SettingsGroup>
+
+    <!-- Debug Logging Group -->
+    <SettingsGroup :title="$t('settings.advanced.debugging')">
+      <!-- Debug Logging Toggle -->
+      <SettingItem
+        :label="$t('settings.advanced.debugLogging')"
+        :help-text="$t('settings.advanced.debugLoggingHelp')"
+      >
+        <ToggleSwitch
+          :model-value="advancedConfig.debugLogging"
+          :aria-label="$t('settings.advanced.debugLogging')"
+          @update:model-value="handleDebugLoggingChange"
+        />
+      </SettingItem>
+
+      <!-- Debug Log Path -->
+      <SettingItem
+        v-show="advancedConfig.debugLogging"
+        :label="$t('settings.advanced.debugLogPath')"
+      >
+        <div class="path-input">
+          <input
+            :value="advancedConfig.debugLogPath"
+            type="text"
+            class="setting-input path-text"
+            readonly
+          />
+          <button class="browse-btn" @click="handleBrowseLogPath">
+            {{ $t('settings.browse') }}
+          </button>
+        </div>
+      </SettingItem>
+    </SettingsGroup>
+
+    <!-- Data Management Group -->
+    <SettingsGroup :title="$t('settings.advanced.dataManagement')">
+      <!-- Portable Mode Toggle -->
+      <SettingItem
+        :label="$t('settings.advanced.portableMode')"
+        :help-text="$t('settings.advanced.portableModeHelp')"
+      >
+        <ToggleSwitch
+          :model-value="advancedConfig.portableMode"
+          :aria-label="$t('settings.advanced.portableMode')"
+          @update:model-value="handlePortableModeChange"
+        />
+      </SettingItem>
+
+      <!-- Portable Mode Warning -->
+      <div v-if="showPortableWarning" class="warning-message">
+        <span class="warning-icon">⚠️</span>
+        <span class="warning-text">{{ $t('settings.advanced.portableModeWarning') }}</span>
+      </div>
+
+      <!-- Import/Export Buttons -->
+      <SettingItem :label="$t('settings.advanced.importExport')">
+        <div class="button-group">
+          <button class="action-btn" @click="handleImport">
+            {{ $t('settings.advanced.import') }}
+          </button>
+          <button class="action-btn" @click="handleExport">
+            {{ $t('settings.advanced.export') }}
+          </button>
+        </div>
+      </SettingItem>
+    </SettingsGroup>
+  </div>
+</template>
 
 <style scoped>
 .advanced-section {
@@ -318,35 +318,35 @@ async function handleExport(): Promise<void> {
 .setting-select {
   width: 120px;
   padding: 6px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--color-border, #38383a);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--color-input-bg, rgba(118, 118, 128, 0.24));
+  color: var(--color-text-primary, #fff);
   font-size: 13px;
 }
 
 .setting-select:focus {
   outline: none;
-  border-color: #4285f4;
+  border-color: var(--color-accent, #0a84ff);
 }
 
 .setting-input {
   width: 200px;
   padding: 6px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--color-border, #38383a);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--color-input-bg, rgba(118, 118, 128, 0.24));
+  color: var(--color-text-primary, #fff);
   font-size: 13px;
 }
 
 .setting-input:focus {
   outline: none;
-  border-color: #4285f4;
+  border-color: var(--color-accent, #0a84ff);
 }
 
 .setting-input::placeholder {
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--color-text-tertiary, #ebebf54d);
 }
 
 .port-input {
@@ -364,17 +364,17 @@ async function handleExport(): Promise<void> {
 
 .browse-btn {
   padding: 6px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--color-border, #38383a);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--color-input-bg, rgba(118, 118, 128, 0.24));
+  color: var(--color-text-primary, #fff);
   font-size: 13px;
   cursor: pointer;
-  transition: background-color 0.1s;
+  transition: background-color var(--transition-fast, 0.15s);
 }
 
 .browse-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--color-bg-tertiary, #3a3a3c);
 }
 
 .warning-message {
@@ -382,9 +382,9 @@ async function handleExport(): Promise<void> {
   align-items: center;
   gap: 8px;
   padding: 12px;
-  background: rgba(255, 193, 7, 0.1);
-  border: 1px solid rgba(255, 193, 7, 0.3);
-  border-radius: 4px;
+  background: var(--color-warning-light, rgba(255, 159, 10, 0.15));
+  border: 1px solid var(--color-warning, #ff9f0a);
+  border-radius: var(--radius-sm, 6px);
   margin-top: 8px;
 }
 
@@ -393,7 +393,7 @@ async function handleExport(): Promise<void> {
 }
 
 .warning-text {
-  color: rgba(255, 193, 7, 0.9);
+  color: var(--color-warning, #ff9f0a);
   font-size: 12px;
 }
 
@@ -404,16 +404,16 @@ async function handleExport(): Promise<void> {
 
 .action-btn {
   padding: 6px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--color-border, #38383a);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--color-input-bg, rgba(118, 118, 128, 0.24));
+  color: var(--color-text-primary, #fff);
   font-size: 13px;
   cursor: pointer;
-  transition: background-color 0.1s;
+  transition: background-color var(--transition-fast, 0.15s);
 }
 
 .action-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--color-bg-tertiary, #3a3a3c);
 }
 </style>

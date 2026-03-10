@@ -1,33 +1,3 @@
-<template>
-  <div class="parameter-slider" :class="{ disabled: disabled }">
-    <label class="slider-label">{{ label }}</label>
-    <div class="slider-container">
-      <input
-        type="range"
-        class="slider-input"
-        :value="internalValue"
-        :min="min"
-        :max="max"
-        :step="step"
-        :disabled="disabled"
-        @input="handleSliderInput"
-      />
-      <input
-        type="number"
-        class="number-input"
-        :value="displayNumber"
-        :min="min"
-        :max="max"
-        :step="step"
-        :disabled="disabled"
-        @input="handleNumberInput"
-        @blur="handleNumberBlur"
-      />
-      <span v-if="suffix" class="value-suffix">{{ suffix }}</span>
-    </div>
-  </div>
-</template>
-
 <script setup lang="ts">
 /**
  * ParameterSlider - 参数滑块组件
@@ -148,6 +118,36 @@ function handleNumberBlur(event: Event) {
   emit('update:modelValue', clampedValue)
 }
 </script>
+
+<template>
+  <div class="parameter-slider" :class="{ disabled: disabled }">
+    <label class="slider-label">{{ label }}</label>
+    <div class="slider-container">
+      <input
+        type="range"
+        class="slider-input"
+        :value="internalValue"
+        :min="min"
+        :max="max"
+        :step="step"
+        :disabled="disabled"
+        @input="handleSliderInput"
+      />
+      <input
+        type="number"
+        class="number-input"
+        :value="displayNumber"
+        :min="min"
+        :max="max"
+        :step="step"
+        :disabled="disabled"
+        @input="handleNumberInput"
+        @blur="handleNumberBlur"
+      />
+      <span v-if="suffix" class="value-suffix">{{ suffix }}</span>
+    </div>
+  </div>
+</template>
 
 <style scoped>
 .parameter-slider {

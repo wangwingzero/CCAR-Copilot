@@ -1,40 +1,3 @@
-<template>
-  <nav class="settings-sidebar" role="navigation" aria-label="Settings navigation">
-    <div class="sidebar-content">
-      <template v-for="group in settingsGroups" :key="group.id">
-        <!-- Group Header -->
-        <div class="group-header">
-          {{ t(group.headerKey) }}
-        </div>
-        
-        <!-- Menu Items -->
-        <ul class="menu-list" role="menu">
-          <li
-            v-for="item in group.items"
-            :key="item.id"
-            role="menuitem"
-          >
-            <button
-              class="menu-item"
-              :class="{ active: modelValue === item.id }"
-              :aria-current="modelValue === item.id ? 'page' : undefined"
-              @click="handleItemClick(item.id)"
-            >
-              <component
-                :is="icons[item.icon]"
-                class="menu-icon"
-                :size="18"
-                :stroke-width="1.5"
-              />
-              <span class="menu-label">{{ t(item.labelKey) }}</span>
-            </button>
-          </li>
-        </ul>
-      </template>
-    </div>
-  </nav>
-</template>
-
 <script setup lang="ts">
 /**
  * SettingsSidebar - Grouped sidebar navigation for settings panel
@@ -99,17 +62,6 @@ const settingsGroups = computed<SettingsGroup[]>(() => [
     headerKey: 'settings.group.basic',
     items: [
       { id: 'general', icon: 'settings', labelKey: 'settings.general' },
-      { id: 'hotkeys', icon: 'keyboard', labelKey: 'settings.hotkeys' },
-      { id: 'screenshot', icon: 'camera', labelKey: 'settings.screenshot' },
-    ]
-  },
-  {
-    id: 'features',
-    headerKey: 'settings.group.features',
-    items: [
-      { id: 'pinImage', icon: 'pin', labelKey: 'settings.pinImage.title' },
-      { id: 'recording', icon: 'video', labelKey: 'settings.recording' },
-      { id: 'anki', icon: 'book-open', labelKey: 'settings.anki' },
     ]
   },
   {
@@ -118,7 +70,6 @@ const settingsGroups = computed<SettingsGroup[]>(() => [
     items: [
       { id: 'notification', icon: 'bell', labelKey: 'settings.notification.title' },
       { id: 'update', icon: 'refresh-cw', labelKey: 'settings.update.title' },
-      { id: 'account', icon: 'user', labelKey: 'settings.account.title' },
       { id: 'about', icon: 'info', labelKey: 'settings.about.title' },
     ]
   },
@@ -132,6 +83,40 @@ function handleItemClick(categoryId: string): void {
   emit('update:modelValue', categoryId)
 }
 </script>
+
+<template>
+  <nav class="settings-sidebar" role="navigation" aria-label="Settings navigation">
+    <div class="sidebar-content">
+      <template v-for="group in settingsGroups" :key="group.id">
+        <!-- Group Header -->
+        <div class="group-header">
+          {{ t(group.headerKey) }}
+        </div>
+        
+        <!-- Menu Items -->
+        <ul class="menu-list" role="menu">
+          <li
+            v-for="item in group.items"
+            :key="item.id"
+            role="menuitem"
+          >
+            <button
+              class="menu-item"
+              :class="{ active: modelValue === item.id }"
+              :aria-current="modelValue === item.id ? 'page' : undefined"
+              @click="handleItemClick(item.id)"
+            >
+              <component
+                :is="icons[item.icon]"
+                class="menu-icon"
+                :size="18"
+                :stroke-width="1.5"
+              />
+              <span class="menu-label">{{ t(item.labelKey) }}</span>
+            </button>
+          </li>
+        </ul>
+      </template>
 
 <style scoped>
 .settings-sidebar {

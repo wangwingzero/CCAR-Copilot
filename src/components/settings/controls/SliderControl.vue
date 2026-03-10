@@ -1,18 +1,3 @@
-<template>
-  <div class="slider-control">
-    <input
-      type="range"
-      class="slider-input"
-      :value="modelValue"
-      :min="min"
-      :max="max"
-      :step="step"
-      @input="handleInput"
-    />
-    <span class="slider-value">{{ displayValue }}</span>
-  </div>
-</template>
-
 <script setup lang="ts">
 /**
  * SliderControl - Range slider with value display
@@ -88,6 +73,21 @@ const displayValue = computed(() => {
   return props.suffix ? `${formattedValue}${props.suffix}` : formattedValue
 })
 </script>
+
+<template>
+  <div class="slider-control">
+    <input
+      type="range"
+      class="slider-input"
+      :value="modelValue"
+      :min="min"
+      :max="max"
+      :step="step"
+      @input="handleInput"
+    />
+    <span class="slider-value">{{ displayValue }}</span>
+  </div>
+</template>
 
 <style scoped>
 .slider-control {

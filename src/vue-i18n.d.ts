@@ -6,14 +6,18 @@
  * @validates Requirements 17.6
  */
 
-import { DefineLocaleMessage } from 'vue-i18n'
+import type { DefineLocaleMessage } from 'vue-i18n'
+
+// DefineLocaleMessage 用于扩展 vue-i18n 类型系统
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _LocaleMessage = DefineLocaleMessage
 
 declare module '@vue/runtime-core' {
   interface ComponentCustomProperties {
-    $t: (key: string, ...args: any[]) => string
-    $tc: (key: string, choice?: number, ...args: any[]) => string
-    $n: (value: number, ...args: any[]) => string
-    $d: (value: Date, ...args: any[]) => string
+    $t: (key: string, ...args: unknown[]) => string
+    $tc: (key: string, choice?: number, ...args: unknown[]) => string
+    $n: (value: number, ...args: unknown[]) => string
+    $d: (value: Date, ...args: unknown[]) => string
   }
 }
 

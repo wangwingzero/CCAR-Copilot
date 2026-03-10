@@ -1,19 +1,3 @@
-<template>
-  <div class="color-picker">
-    <div
-      class="color-preview"
-      :style="{ backgroundColor: modelValue }"
-      :title="modelValue"
-    ></div>
-    <input
-      type="color"
-      class="color-input"
-      :value="modelValue"
-      @input="handleInput"
-    />
-  </div>
-</template>
-
 <script setup lang="ts">
 /**
  * ColorPicker - Color selection control with preview
@@ -55,6 +39,22 @@ function handleInput(event: Event) {
   emit('update:modelValue', color)
 }
 </script>
+
+<template>
+  <div class="color-picker">
+    <div
+      class="color-preview"
+      :style="{ backgroundColor: modelValue }"
+      :title="modelValue"
+    ></div>
+    <input
+      type="color"
+      class="color-input"
+      :value="modelValue"
+      @input="handleInput"
+    />
+  </div>
+</template>
 
 <style scoped>
 .color-picker {

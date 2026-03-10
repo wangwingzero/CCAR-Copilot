@@ -1,3 +1,117 @@
+<script setup lang="ts">
+/**
+ * 设置面板组件 - 侧边栏布局版本
+ *
+ * 支持的设置类别：
+ * - 基础设置：通用
+ * - 系统设置：通知、更新、关于
+ */
+
+import { ref, reactive, onMounted, watch } from 'vue'
+import { useSettingsStore } from '@/stores/settings'
+import { useTheme } from '@/composables/useTheme'
+import { useLocale } from '@/composables/useLocale'
+import type { AppConfig } from '@/types'
+import { DEFAULT_CONFIG } from '@/types'
+import SettingsSidebar from './SettingsSidebar.vue'
+import NotificationSection from './sections/NotificationSection.vue'
+import UpdateSection from './sections/UpdateSection.vue'
+import AboutSection from './sections/AboutSection.vue'
+
+// ============================================
+// Store & Composables
+// ============================================
+
+const settingsStore = useSettingsStore()
+const { setTheme } = useTheme()
+const { supportedLocales, changeLocale } = useLocale()
+
+// ============================================
+// State
+// ============================================
+
+const activeCategory = ref('general')
+const localConfig = reactive<AppConfig>(structuredClone(DEFAULT_CONFIG))
+const showResetConfirm = ref(false)
+
+const settingsToast = reactive({
+  visible: false,
+  message: '',
+  type: 'error' as 'success' | 'error',
+})
+let settingsToastTimer: ReturnType<typeof setTimeout> | null = null
+
+function showSettingsToast(message: string, type: 'success' | 'error' = 'error'): void {
+  if (settingsToastTimer) clearTimeout(settingsToastTimer)
+  settingsToast.message = message
+  settingsToast.type = type
+  settingsToast.visible = true
+  settingsToastTimer = setTimeout(() => {
+    settingsToast.visible = false
+  }, 3000)
+}
+
+// ============================================
+// Lifecycle
+// ============================================
+
+onMounted(async () => {
+  await loadSettings()
+})
+
+watch(
+  () => settingsStore.config,
+  (newConfig) => {
+    Object.assign(localConfig, structuredClone(newConfig))
+  },
+  { deep: true }
+)
+
+// ============================================
+// Methods
+// ============================================
+
+async function loadSettings(): Promise<void> {
+  try {
+    await settingsStore.loadConfig()
+    Object.assign(localConfig, structuredClone(settingsStore.config))
+  } catch (error) {
+    console.error('Failed to load settings:', error)
+    showSettingsToast('加载设置失败，使用默认配置')
+  }
+}
+
+function handleReset(): void {
+  settingsStore.resetToDefault()
+  Object.assign(localConfig, structuredClone(DEFAULT_CONFIG))
+  showResetConfirm.value = false
+}
+
+function handleGeneralChange(): void {
+  settingsStore.updateGeneral({
+    language: localConfig.general.language,
+    theme: localConfig.general.theme,
+    minimizeToTray: localConfig.general.minimizeToTray,
+  })
+  setTheme(localConfig.general.theme)
+}
+
+function handleLanguageChange(): void {
+  changeLocale(localConfig.general.language as 'zh-CN' | 'en-US')
+  handleGeneralChange()
+}
+
+async function handleAutoStartChange(): Promise<void> {
+  try {
+    await settingsStore.setAutoStart(localConfig.general.autoStart)
+  } catch (error) {
+    localConfig.general.autoStart = !localConfig.general.autoStart
+    console.error('Failed to set auto start:', error)
+    showSettingsToast('设置开机自启动失败')
+  }
+}
+</script>
+
 <template>
   <div class="settings-panel">
     <!-- 头部 -->
@@ -79,338 +193,6 @@
               <span class="toggle-slider"></span>
             </div>
           </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.closeToTray') }}</label>
-            <div class="setting-toggle">
-              <input
-                v-model="localConfig.general.closeToTray"
-                type="checkbox"
-                class="toggle-input"
-                @change="handleGeneralChange"
-              />
-              <span class="toggle-slider"></span>
-            </div>
-          </div>
-        </div>
-
-        <!-- 热键设置 -->
-        <div v-show="activeCategory === 'hotkeys'" class="settings-section">
-          <h3 class="section-title">{{ $t('settings.hotkeys') }}</h3>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('screenshot.capture') }}</label>
-            <HotkeyInput
-              v-model="localConfig.hotkeys.screenshot"
-              @change="handleHotkeyChange('screenshot', $event)"
-            />
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('ocr.title') }}</label>
-            <HotkeyInput
-              v-model="localConfig.hotkeys.ocr"
-              @change="handleHotkeyChange('ocr', $event)"
-            />
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('recording.title') }}</label>
-            <HotkeyInput
-              v-model="localConfig.hotkeys.recording"
-              @change="handleHotkeyChange('recording', $event)"
-            />
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('tray.pin') || '贴图' }}</label>
-            <HotkeyInput
-              v-model="localConfig.hotkeys.pin"
-              @change="handleHotkeyChange('pin', $event)"
-            />
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.mouseHighlight.title') }}</label>
-            <HotkeyInput
-              v-model="localConfig.hotkeys.mouseHighlight"
-              @change="handleHotkeyChange('mouseHighlight', $event)"
-            />
-          </div>
-        </div>
-
-        <!-- 截图设置 -->
-        <div v-show="activeCategory === 'screenshot'" class="settings-section">
-          <h3 class="section-title">{{ $t('settings.screenshot') }}</h3>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.saveLocation') }}</label>
-            <div class="path-input">
-              <input
-                v-model="localConfig.screenshot.saveLocation"
-                type="text"
-                class="setting-text"
-                :placeholder="$t('settings.browse')"
-                readonly
-              />
-              <button class="browse-btn" @click="handleBrowseSaveLocation">
-                {{ $t('settings.browse') }}
-              </button>
-            </div>
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.defaultFormat') }}</label>
-            <select
-              v-model="localConfig.screenshot.defaultFormat"
-              class="setting-select"
-              @change="handleScreenshotChange"
-            >
-              <option value="png">PNG ({{ $t('settings.lossless') || '无损' }})</option>
-              <option value="jpg">JPG ({{ $t('settings.compressed') || '压缩' }})</option>
-            </select>
-          </div>
-
-          <div
-            v-show="localConfig.screenshot.defaultFormat === 'jpg'"
-            class="setting-item"
-          >
-            <label class="setting-label">{{ $t('settings.jpgQuality') }}</label>
-            <div class="slider-container">
-              <input
-                v-model.number="localConfig.screenshot.jpgQuality"
-                type="range"
-                min="1"
-                max="100"
-                class="setting-slider"
-                @change="handleScreenshotChange"
-              />
-              <span class="slider-value">{{ localConfig.screenshot.jpgQuality }}%</span>
-            </div>
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.includeMouseCursor') }}</label>
-            <div class="setting-toggle">
-              <input
-                v-model="localConfig.screenshot.includeMouseCursor"
-                type="checkbox"
-                class="toggle-input"
-                @change="handleScreenshotChange"
-              />
-              <span class="toggle-slider"></span>
-            </div>
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.autoCopy') }}</label>
-            <div class="setting-toggle">
-              <input
-                v-model="localConfig.screenshot.autoCopy"
-                type="checkbox"
-                class="toggle-input"
-                @change="handleScreenshotChange"
-              />
-              <span class="toggle-slider"></span>
-            </div>
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.autoSave') }}</label>
-            <div class="setting-toggle">
-              <input
-                v-model="localConfig.screenshot.autoSave"
-                type="checkbox"
-                class="toggle-input"
-                @change="handleScreenshotChange"
-              />
-              <span class="toggle-slider"></span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Anki 设置 -->
-        <div v-show="activeCategory === 'anki'" class="settings-section">
-          <h3 class="section-title">{{ $t('settings.anki') }}</h3>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.ankiConnectUrl') }}</label>
-            <input
-              v-model="localConfig.anki.ankiConnectUrl"
-              type="text"
-              class="setting-text"
-              placeholder="http://127.0.0.1:8765"
-              @change="handleAnkiChange"
-            />
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.defaultDeck') }}</label>
-            <input
-              v-model="localConfig.anki.defaultDeck"
-              type="text"
-              class="setting-text"
-              placeholder="Default"
-              @change="handleAnkiChange"
-            />
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.defaultNoteType') }}</label>
-            <input
-              v-model="localConfig.anki.defaultNoteType"
-              type="text"
-              class="setting-text"
-              placeholder="Basic"
-              @change="handleAnkiChange"
-            />
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.autoAddToAnki') }}</label>
-            <div class="setting-toggle">
-              <input
-                v-model="localConfig.anki.autoAddToAnki"
-                type="checkbox"
-                class="toggle-input"
-                @change="handleAnkiChange"
-              />
-              <span class="toggle-slider"></span>
-            </div>
-          </div>
-
-          <!-- 单词卡配图 API Key -->
-          <h3 class="section-title" style="margin-top: 24px;">单词卡配图 (可选)</h3>
-
-          <div class="setting-item">
-            <label class="setting-label">Unsplash API Key</label>
-            <input
-              v-model="localConfig.anki.unsplashKeys"
-              type="text"
-              class="setting-text"
-              placeholder="填入可获取高质量单词配图"
-              @change="handleAnkiChange"
-            />
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">Pixabay API Key</label>
-            <input
-              v-model="localConfig.anki.pixabayKey"
-              type="text"
-              class="setting-text"
-              placeholder="填入可获取单词配图（备用）"
-              @change="handleAnkiChange"
-            />
-          </div>
-
-          <!-- Anki 入门指南 -->
-          <h3 class="section-title" style="margin-top: 24px;">使用指南</h3>
-
-          <div class="anki-guide">
-            <div class="guide-step">
-              <span class="step-number">1</span>
-              <div class="step-content">
-                <strong>安装 Anki</strong>
-                <p>下载并安装 <a href="https://apps.ankiweb.net/" target="_blank">Anki</a></p>
-              </div>
-            </div>
-            <div class="guide-step">
-              <span class="step-number">2</span>
-              <div class="step-content">
-                <strong>安装 AnkiConnect 插件</strong>
-                <p>在 Anki 中：工具 → 插件 → 获取插件，输入代码 <code>2055492159</code></p>
-              </div>
-            </div>
-            <div class="guide-step">
-              <span class="step-number">3</span>
-              <div class="step-content">
-                <strong>重启 Anki</strong>
-                <p>安装插件后需要重启 Anki 才能生效</p>
-              </div>
-            </div>
-            <div class="guide-step">
-              <span class="step-number">4</span>
-              <div class="step-content">
-                <strong>使用方式</strong>
-                <p>截图时点击侧边工具栏的 📚 Anki 按钮，即可提取英文单词并批量制卡</p>
-              </div>
-            </div>
-          </div>
-
-          <div class="setting-item" style="border-bottom: none;">
-            <label class="setting-label">连接测试</label>
-            <button class="browse-btn" @click="testAnkiConnection">测试连接</button>
-          </div>
-          <div v-if="ankiTestResult" class="anki-test-result" :class="ankiTestResult.ok ? 'success' : 'error'">
-            {{ ankiTestResult.message }}
-          </div>
-        </div>
-
-        <!-- 录屏设置 -->
-        <div v-show="activeCategory === 'recording'" class="settings-section">
-          <h3 class="section-title">{{ $t('settings.recording') }}</h3>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('recording.outputDir') }}</label>
-            <div class="path-input">
-              <input
-                v-model="localConfig.recording.outputDir"
-                type="text"
-                class="setting-text"
-                :placeholder="$t('settings.browse')"
-                readonly
-              />
-              <button class="browse-btn" @click="handleBrowseRecordingDir">
-                {{ $t('settings.browse') }}
-              </button>
-            </div>
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.defaultFps') }}</label>
-            <select
-              v-model.number="localConfig.recording.defaultFps"
-              class="setting-select"
-              @change="handleRecordingChange"
-            >
-              <option :value="15">15 FPS</option>
-              <option :value="24">24 FPS</option>
-              <option :value="30">30 FPS</option>
-              <option :value="60">60 FPS</option>
-            </select>
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.systemAudioEnabled') }}</label>
-            <div class="setting-toggle">
-              <input
-                v-model="localConfig.recording.systemAudio"
-                type="checkbox"
-                class="toggle-input"
-                @change="handleRecordingChange"
-              />
-              <span class="toggle-slider"></span>
-            </div>
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">{{ $t('settings.micAudioEnabled') }}</label>
-            <div class="setting-toggle">
-              <input
-                v-model="localConfig.recording.micAudio"
-                type="checkbox"
-                class="toggle-input"
-                @change="handleRecordingChange"
-              />
-              <span class="toggle-slider"></span>
-            </div>
-          </div>
-        </div>
-
-        <!-- 贴图设置 -->
-        <div v-show="activeCategory === 'pinImage'" class="settings-section">
-          <PinImageSection />
         </div>
 
         <!-- 通知设置 -->
@@ -421,11 +203,6 @@
         <!-- 更新设置 -->
         <div v-show="activeCategory === 'update'" class="settings-section">
           <UpdateSection />
-        </div>
-
-        <!-- 账户设置 -->
-        <div v-show="activeCategory === 'account'" class="settings-section">
-          <AccountSection />
         </div>
 
         <!-- 关于 -->
@@ -477,247 +254,7 @@
   </div>
 </template>
 
-<script setup lang="ts">
-/**
- * 设置面板组件 - 侧边栏布局版本
- *
- * 提供应用配置管理界面：
- * - 左侧：分组侧边栏导航 (SettingsSidebar)
- * - 右侧：动态内容区域
- *
- * 支持的设置类别：
- * - 基础设置：通用、热键、截图
- * - 功能设置：贴图、录屏、Anki
- * - 系统设置：通知、更新、账户、关于
- *
- * @validates Requirements 1.1, 1.2, 17.1, 17.2, 17.5, 17.6
- */
-
-import { ref, reactive, onMounted, watch } from 'vue'
-import { open } from '@tauri-apps/plugin-dialog'
-import { useSettingsStore } from '@/stores/settings'
-import { useTheme } from '@/composables/useTheme'
-import { useLocale } from '@/composables/useLocale'
-import type { AppConfig } from '@/types'
-import { DEFAULT_CONFIG } from '@/types'
-import HotkeyInput from './HotkeyInput.vue'
-import SettingsSidebar from './SettingsSidebar.vue'
-import PinImageSection from './sections/PinImageSection.vue'
-import NotificationSection from './sections/NotificationSection.vue'
-import UpdateSection from './sections/UpdateSection.vue'
-import AccountSection from './sections/AccountSection.vue'
-import AboutSection from './sections/AboutSection.vue'
-
-// ============================================
-// Store & Composables
-// ============================================
-
-const settingsStore = useSettingsStore()
-const { setTheme } = useTheme()
-const { supportedLocales, changeLocale } = useLocale()
-
-// ============================================
-// State
-// ============================================
-
-/** 当前激活的设置类别 - 默认为 'general' */
-const activeCategory = ref('general')
-
-/** 本地配置副本 */
-const localConfig = reactive<AppConfig>(JSON.parse(JSON.stringify(DEFAULT_CONFIG)))
-
-/** 显示重置确认对话框 */
-const showResetConfirm = ref(false)
-
-/** Anki 连接测试结果 */
-const ankiTestResult = ref<{ ok: boolean; message: string } | null>(null)
-
-/** 设置操作反馈 toast */
-const settingsToast = reactive({
-  visible: false,
-  message: '',
-  type: 'error' as 'success' | 'error',
-})
-let settingsToastTimer: ReturnType<typeof setTimeout> | null = null
-
-function showSettingsToast(message: string, type: 'success' | 'error' = 'error'): void {
-  if (settingsToastTimer) clearTimeout(settingsToastTimer)
-  settingsToast.message = message
-  settingsToast.type = type
-  settingsToast.visible = true
-  settingsToastTimer = setTimeout(() => {
-    settingsToast.visible = false
-  }, 3000)
-}
-
-// ============================================
-// Lifecycle
-// ============================================
-
-onMounted(async () => {
-  await loadSettings()
-})
-
-// 监听 store 配置变化，同步到本地
-watch(
-  () => settingsStore.config,
-  (newConfig) => {
-    Object.assign(localConfig, JSON.parse(JSON.stringify(newConfig)))
-  },
-  { deep: true }
-)
-
-// ============================================
-// Methods
-// ============================================
-
-/** 加载设置 */
-async function loadSettings(): Promise<void> {
-  try {
-    await settingsStore.loadConfig()
-    Object.assign(localConfig, JSON.parse(JSON.stringify(settingsStore.config)))
-  } catch (error) {
-    console.error('Failed to load settings:', error)
-    showSettingsToast('加载设置失败，使用默认配置')
-  }
-}
-
-
-/** 重置设置 */
-function handleReset(): void {
-  settingsStore.resetToDefault()
-  Object.assign(localConfig, JSON.parse(JSON.stringify(DEFAULT_CONFIG)))
-  showResetConfirm.value = false
-}
-
-/** 通用设置变更 */
-function handleGeneralChange(): void {
-  settingsStore.updateGeneral({
-    language: localConfig.general.language,
-    theme: localConfig.general.theme,
-    minimizeToTray: localConfig.general.minimizeToTray,
-    closeToTray: localConfig.general.closeToTray,
-  })
-  // 同步主题到 DOM 和 localStorage
-  setTheme(localConfig.general.theme)
-}
-
-/** 语言变更（需要同时更新 i18n） */
-function handleLanguageChange(): void {
-  changeLocale(localConfig.general.language as 'zh-CN' | 'en-US')
-  handleGeneralChange()
-}
-
-/** 自动启动变更（需要调用特殊 API） */
-async function handleAutoStartChange(): Promise<void> {
-  try {
-    await settingsStore.setAutoStart(localConfig.general.autoStart)
-  } catch (error) {
-    localConfig.general.autoStart = !localConfig.general.autoStart
-    console.error('Failed to set auto start:', error)
-    showSettingsToast('设置开机自启动失败')
-  }
-}
-
-/** 热键变更 */
-async function handleHotkeyChange(action: string, shortcut: string): Promise<void> {
-  try {
-    await settingsStore.updateHotkeys({ [action]: shortcut })
-  } catch (error) {
-    Object.assign(localConfig.hotkeys, settingsStore.hotkeys)
-    console.error('Failed to update hotkey:', error)
-    showSettingsToast('更新快捷键失败')
-  }
-}
-
-/** 截图设置变更 */
-function handleScreenshotChange(): void {
-  settingsStore.updateScreenshot({
-    defaultFormat: localConfig.screenshot.defaultFormat,
-    jpgQuality: localConfig.screenshot.jpgQuality,
-    includeMouseCursor: localConfig.screenshot.includeMouseCursor,
-    autoCopy: localConfig.screenshot.autoCopy,
-    autoSave: localConfig.screenshot.autoSave,
-  })
-}
-
-/** 浏览保存位置 */
-async function handleBrowseSaveLocation(): Promise<void> {
-  const selected = await open({
-    directory: true,
-    multiple: false,
-    title: '选择截图保存目录',
-  })
-
-  if (selected && typeof selected === 'string') {
-    localConfig.screenshot.saveLocation = selected
-    settingsStore.updateScreenshot({ saveLocation: selected })
-  }
-}
-
-/** Anki 设置变更 */
-function handleAnkiChange(): void {
-  settingsStore.updateAnki({
-    ankiConnectUrl: localConfig.anki.ankiConnectUrl,
-    defaultDeck: localConfig.anki.defaultDeck,
-    defaultNoteType: localConfig.anki.defaultNoteType,
-    autoAddToAnki: localConfig.anki.autoAddToAnki,
-    unsplashKeys: localConfig.anki.unsplashKeys,
-    pixabayKey: localConfig.anki.pixabayKey,
-  })
-}
-
-/** 测试 Anki 连接 */
-async function testAnkiConnection(): Promise<void> {
-  ankiTestResult.value = null
-  try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    // 先确保 Sidecar 已启动
-    const running = await invoke<boolean>('check_sidecar_status')
-    if (!running) {
-      await invoke('start_sidecar')
-    }
-    const result = await invoke<Record<string, unknown>>('call_sidecar', {
-      service: 'anki',
-      method: 'check_connection',
-      params: {},
-    })
-    if (result && (result as { connected?: boolean }).connected) {
-      ankiTestResult.value = { ok: true, message: '连接成功！Anki 已就绪。' }
-    } else {
-      ankiTestResult.value = { ok: false, message: '连接失败，请确保 Anki 已启动并安装了 AnkiConnect 插件。' }
-    }
-  } catch (e) {
-    ankiTestResult.value = { ok: false, message: `连接失败: ${e instanceof Error ? e.message : String(e)}` }
-  }
-}
-
-/** 录屏设置变更 */
-function handleRecordingChange(): void {
-  settingsStore.updateRecording({
-    defaultFps: localConfig.recording.defaultFps,
-    systemAudio: localConfig.recording.systemAudio,
-    micAudio: localConfig.recording.micAudio,
-  })
-}
-
-/** 浏览录屏输出目录 */
-async function handleBrowseRecordingDir(): Promise<void> {
-  const selected = await open({
-    directory: true,
-    multiple: false,
-    title: '选择录屏输出目录',
-  })
-
-  if (selected && typeof selected === 'string') {
-    localConfig.recording.outputDir = selected
-    settingsStore.updateRecording({ outputDir: selected })
-  }
-}
-</script>
-
 <style scoped>
-/* CSS Variables - 映射到全局主题变量，自动跟随深色/浅色主题 */
 .settings-panel {
   --bg-primary: var(--color-bg-primary);
   --bg-secondary: var(--color-bg-secondary);
@@ -742,7 +279,6 @@ async function handleBrowseRecordingDir(): Promise<void> {
   font-size: 13px;
 }
 
-/* 头部 */
 .panel-header {
   display: flex;
   justify-content: space-between;
@@ -787,27 +323,16 @@ async function handleBrowseRecordingDir(): Promise<void> {
   opacity: 0.8;
 }
 
-.action-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.save-btn:hover {
-  background: var(--color-info-light);
-}
-
 .reset-btn:hover {
   background: var(--color-error-light);
 }
 
-/* 主体区域：侧边栏 + 内容区 */
 .panel-body {
   display: flex;
   flex: 1;
   overflow: hidden;
 }
 
-/* 设置内容区 */
 .settings-content {
   flex: 1;
   overflow-y: auto;
@@ -828,14 +353,6 @@ async function handleBrowseRecordingDir(): Promise<void> {
   border-bottom: 1px solid var(--border-color);
 }
 
-/* Placeholder text for upcoming sections */
-.placeholder-text {
-  color: var(--text-muted);
-  font-style: italic;
-  padding: 24px 0;
-}
-
-/* 设置项 */
 .setting-item {
   display: flex;
   justify-content: space-between;
@@ -849,7 +366,6 @@ async function handleBrowseRecordingDir(): Promise<void> {
   font-size: 13px;
 }
 
-/* 下拉选择 */
 .setting-select {
   padding: 6px 12px;
   border: 1px solid var(--color-border);
@@ -865,59 +381,6 @@ async function handleBrowseRecordingDir(): Promise<void> {
   border-color: var(--color-border-focus);
 }
 
-/* 文本输入 */
-.setting-text {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  background: var(--color-input-bg);
-  color: var(--text-primary);
-  font-size: 12px;
-  width: 200px;
-}
-
-.setting-text:focus {
-  outline: none;
-  border-color: var(--color-border-focus);
-}
-
-/* 路径输入 */
-.path-input {
-  display: flex;
-  gap: 8px;
-}
-
-.path-input .setting-text {
-  flex: 1;
-}
-
-.browse-btn {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  background: var(--bg-hover);
-  color: var(--text-primary);
-  font-size: 12px;
-  cursor: pointer;
-  transition: background-color 0.1s;
-}
-
-.browse-btn:hover {
-  opacity: 0.8;
-}
-
-/* 颜色选择 */
-.setting-color {
-  width: 60px;
-  height: 30px;
-  padding: 2px;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  background: var(--color-input-bg);
-  cursor: pointer;
-}
-
-/* 开关 */
 .setting-toggle {
   position: relative;
   width: 44px;
@@ -964,39 +427,6 @@ async function handleBrowseRecordingDir(): Promise<void> {
   transform: translateX(20px);
 }
 
-/* 滑块 */
-.slider-container {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.setting-slider {
-  width: 150px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--color-border);
-  appearance: none;
-  cursor: pointer;
-}
-
-.setting-slider::-webkit-slider-thumb {
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--accent-primary);
-  cursor: pointer;
-}
-
-.slider-value {
-  min-width: 50px;
-  color: var(--text-muted);
-  font-size: 12px;
-  text-align: right;
-}
-
-/* 底部状态栏 */
 .panel-footer {
   padding: 8px 16px;
   background: var(--bg-secondary);
@@ -1017,7 +447,6 @@ async function handleBrowseRecordingDir(): Promise<void> {
   color: var(--text-muted);
 }
 
-/* 模态对话框 */
 .modal-overlay {
   position: fixed;
   top: 0;
@@ -1090,7 +519,6 @@ async function handleBrowseRecordingDir(): Promise<void> {
   opacity: 0.9;
 }
 
-/* Scrollbar styling for content area */
 .settings-content::-webkit-scrollbar {
   width: 6px;
 }
@@ -1108,89 +536,6 @@ async function handleBrowseRecordingDir(): Promise<void> {
   background: var(--text-muted);
 }
 
-/* Anki 入门指南 */
-.anki-guide {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.guide-step {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-
-.step-number {
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--accent-primary);
-  color: white;
-  font-size: 12px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.step-content {
-  flex: 1;
-}
-
-.step-content strong {
-  display: block;
-  font-size: 13px;
-  color: var(--text-primary);
-  margin-bottom: 2px;
-}
-
-.step-content p {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin: 0;
-  line-height: 1.5;
-}
-
-.step-content a {
-  color: var(--accent-primary);
-  text-decoration: none;
-}
-
-.step-content a:hover {
-  text-decoration: underline;
-}
-
-.step-content code {
-  background: var(--bg-hover);
-  padding: 2px 6px;
-  border-radius: 3px;
-  font-size: 12px;
-  font-family: var(--font-family-mono, monospace);
-  color: var(--accent-primary);
-}
-
-/* Anki 连接测试结果 */
-.anki-test-result {
-  padding: 8px 12px;
-  border-radius: 4px;
-  font-size: 12px;
-  margin-top: 4px;
-}
-
-.anki-test-result.success {
-  background: var(--color-success-light);
-  color: var(--color-success);
-}
-
-.anki-test-result.error {
-  background: var(--color-error-light);
-  color: var(--color-error);
-}
-
-/* 设置操作反馈 toast */
 .settings-toast {
   position: fixed;
   bottom: 24px;

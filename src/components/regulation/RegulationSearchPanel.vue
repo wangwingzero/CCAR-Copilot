@@ -8,6 +8,7 @@
 
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRegulationQuery, type DateFilter } from '@/composables/useRegulationQuery'
+import { useToast } from '@/composables/useToast'
 // Store 状态统一通过 useRegulationQuery composable 访问，不再直接导入 store
 import type { RegulationDocument, RegulationDocType, RegulationValidity } from '@/types'
 import { invoke } from '@tauri-apps/api/core'
@@ -50,10 +51,24 @@ const {
   syncCompare,
   refreshDbStatus,
   dbSyncStatus,
+  scanAllDrives,
   setDocType,
   setValidity,
   setDateFilter,
+  showSnippets,
+  getSnippet,
 } = useRegulationQuery()
+
+const { toast, showToast, hideToast } = useToast()
+
+/**
+ * HTML 消毒：只允许安全的高亮标签（<b>, <em>, <mark>），移除其他所有 HTML
+ * 防止 XSS 攻击（搜索摘要可能包含来自 OCR / CAAC 网站的不安全内容）
+ */
+function sanitizeHtml(html: string): string {
+  // 保留 <b>, </b>, <em>, </em>, <mark>, </mark> 标签，移除其他所有 HTML 标签
+  return html.replace(/<\/?(?!b>|\/b>|em>|\/em>|mark>|\/mark>)[^>]*>/gi, '')
+}
 
 // 持久化搜索模式
 const SEARCH_MODE_KEY = 'regulation-search-mode'
@@ -64,7 +79,7 @@ function loadSearchMode(): 'online' | 'local' | 'hybrid' {
       return saved
     }
   } catch { /* ignore */ }
-  return 'hybrid'
+  return 'local'
 }
 
 // 本地状态
@@ -156,10 +171,10 @@ onMounted(async () => {
 
   // 如果本地索引文档数较少，自动触发全盘发现
   if (localDocCount.value < 10) {
-    console.log('[RegulationPanel] 本地索引文档较少，触发全盘自动发现...')
+    console.warn('[RegulationPanel] 本地索引文档较少，触发全盘自动发现...')
     try {
       const result = await invoke<{ new_added?: number }>('regulation_discover_local', {})
-      console.log('[RegulationPanel] 全盘发现完成:', result)
+      console.warn('[RegulationPanel] 全盘发现完成:', result)
       // 刷新状态
       await refreshDbStatus()
       // 重新初始化索引以加载新发现的文件
@@ -195,13 +210,14 @@ async function handleSearch(): Promise<void> {
   selectedDocs.value.clear()
   
   switch (searchMode.value) {
-    case 'local':
+    case 'local': {
       // 仅本地搜索
       const localResults = await searchLocal()
       if (localResults.length > 0) {
         lastSearchSource.value = 'local'
       }
       break
+    }
     case 'online':
       // 仅在线搜索
       lastSearchSource.value = 'online'
@@ -248,7 +264,7 @@ async function handleDownload(doc: RegulationDocument): Promise<void> {
 
 // 处理批量下载
 async function handleBatchDownload(): Promise<void> {
-  const selectedList = results.value.filter((doc) =>
+  const selectedList = results.value.filter((doc: RegulationDocument) =>
     selectedDocs.value.has(doc.url)
   )
 
@@ -257,7 +273,7 @@ async function handleBatchDownload(): Promise<void> {
   }
 
   const { success, skipped, failed } = await downloadBatchNative(selectedList)
-  alert(`下载完成：成功 ${success} 个，跳过 ${skipped} 个，失败 ${failed} 个`)
+  showToast(`下载完成：成功 ${success} 个，跳过 ${skipped} 个，失败 ${failed} 个`, failed > 0 ? 'error' : 'success')
   selectedDocs.value.clear()
 }
 
@@ -272,12 +288,12 @@ async function handleProcessPending(): Promise<void> {
     const result = await processPendingFiles(20)
     processResult.value = result
     if (result.processed === 0) {
-      alert('没有待处理的文件')
+      showToast('没有待处理的文件', 'info')
     } else {
-      alert(`处理完成：索引 ${result.indexed} 个，需OCR ${result.needs_ocr} 个，失败 ${result.failed} 个`)
+      showToast(`处理完成：索引 ${result.indexed} 个，需OCR ${result.needs_ocr} 个，失败 ${result.failed} 个`, result.failed > 0 ? 'error' : 'success')
     }
   } catch (err) {
-    alert(`处理失败: ${err}`)
+    showToast(`处理失败: ${err}`, 'error')
   } finally {
     isProcessingFiles.value = false
   }
@@ -297,15 +313,15 @@ async function handleRetryFailedOcr(): Promise<void> {
     }>('regulation_retry_failed_ocr')
 
     if (result.processed === 0) {
-      alert('没有失败的 OCR 文件需要重试')
+      showToast('没有失败的 OCR 文件需要重试', 'info')
     } else {
-      alert(`重试完成: 成功 ${result.ocr_success}, 仍失败 ${result.ocr_failed}`)
+      showToast(`重试完成: 成功 ${result.ocr_success}, 仍失败 ${result.ocr_failed}`, result.ocr_failed > 0 ? 'error' : 'success')
     }
 
     // 刷新数据库状态
     await refreshDbStatus()
   } catch (err) {
-    alert(`重试失败: ${err}`)
+    showToast(`重试失败: ${err}`, 'error')
   } finally {
     isRetryingOcr.value = false
   }
@@ -315,6 +331,13 @@ async function handleRetryFailedOcr(): Promise<void> {
 async function handleSyncCompare(): Promise<void> {
   if (isSyncing.value) return
   await syncCompare('all', 20)
+}
+
+// 全盘扫描 PDF
+async function handleScanAllDrives(): Promise<void> {
+  if (isScanning.value) return
+  await scanAllDrives()
+  await refreshDbStatus()
 }
 
 // 切换选择
@@ -331,7 +354,7 @@ function toggleSelectAll(): void {
   if (selectedDocs.value.size === results.value.length) {
     selectedDocs.value.clear()
   } else {
-    results.value.forEach((doc) => selectedDocs.value.add(doc.url))
+    results.value.forEach((doc: RegulationDocument) => selectedDocs.value.add(doc.url))
   }
 }
 
@@ -377,7 +400,7 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
     <!-- 标题栏 -->
     <div class="panel-header">
       <h2>规章查询</h2>
-      <button class="close-btn" @click="emit('close')" title="关闭">
+      <button class="close-btn" title="关闭" aria-label="关闭规章查询面板" @click="emit('close')">
         <svg viewBox="0 0 24 24" width="20" height="20">
           <path
             fill="currentColor"
@@ -402,7 +425,7 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
           <span class="dash-stat-value">{{ dbSyncStatus.pending_ocr }}</span>
           <span class="dash-stat-label">待处理</span>
         </div>
-        <div class="dash-stat failed" v-if="dbSyncStatus.failed_ocr > 0">
+        <div v-if="dbSyncStatus.failed_ocr > 0" class="dash-stat failed">
           <span class="dash-stat-value">{{ dbSyncStatus.failed_ocr }}</span>
           <span class="dash-stat-label">失败</span>
         </div>
@@ -427,7 +450,7 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
     </div>
 
     <!-- 搜索区域 -->
-    <div class="search-section">
+    <div class="search-section" role="search" aria-label="规章搜索">
       <!-- 搜索框 -->
       <div class="search-bar">
         <input
@@ -435,6 +458,7 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
           type="text"
           placeholder="输入关键词搜索..."
           class="search-input"
+          aria-label="规章搜索关键词"
           @keydown.enter="handleSearch"
         />
         <button
@@ -458,17 +482,23 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
 
       <!-- 搜索模式切换 -->
       <div class="search-mode-section">
-        <div class="mode-buttons">
+        <div class="mode-buttons" role="tablist" aria-label="搜索模式">
           <button
             v-for="option in searchModeOptions"
             :key="option.value"
             :class="['mode-btn', { active: searchMode === option.value }]"
             :title="option.desc"
+            :aria-selected="searchMode === option.value"
+            role="tab"
             @click="searchMode = option.value"
           >
             {{ option.label }}
           </button>
         </div>
+        <label class="snippet-toggle-label">
+          <input v-model="showSnippets" type="checkbox" />
+          显示内容摘要
+        </label>
         <div v-if="isLocalIndexReady" class="local-index-info">
           <span class="index-badge">
             本地已索引 {{ localDocCount }} 篇
@@ -479,18 +509,26 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
           <button
             class="process-btn"
             :disabled="isProcessingFiles"
-            @click="handleProcessPending"
             title="处理已下载但未索引的 PDF 文件"
+            @click="handleProcessPending"
           >
             {{ isProcessingFiles ? '处理中...' : '处理待索引' }}
           </button>
           <button
             class="sync-btn"
             :disabled="isSyncing"
-            @click="handleSyncCompare"
             title="从 CAAC 官网全量爬取规章列表，与本地对比差异"
+            @click="handleSyncCompare"
           >
             {{ isSyncing ? '同步中...' : '同步对比官网' }}
+          </button>
+          <button
+            class="scan-btn"
+            :disabled="isScanning"
+            title="扫描全盘所有 PDF 文件，自动入库索引"
+            @click="handleScanAllDrives"
+          >
+            {{ isScanning ? '扫描中...' : '全盘扫描' }}
           </button>
         </div>
 
@@ -534,8 +572,8 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
             v-if="scanResult.ocr_failed > 0 || (dbSyncStatus && dbSyncStatus.failed_ocr > 0)"
             class="retry-ocr-btn"
             :disabled="isRetryingOcr"
-            @click="handleRetryFailedOcr"
             title="重新处理失败的 OCR 文件"
+            @click="handleRetryFailedOcr"
           >
             {{ isRetryingOcr ? '重试中...' : `重试 OCR (${scanResult.ocr_failed || dbSyncStatus?.failed_ocr || 0})` }}
           </button>
@@ -546,7 +584,7 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
           <div class="sync-summary">
             <span>同步对比: 在线 {{ syncResult.online_total }} 条</span>
             <span>| 已匹配 {{ syncResult.matched }}</span>
-            <span class="sync-new" v-if="syncResult.new_regulations.length > 0">
+            <span v-if="syncResult.new_regulations.length > 0" class="sync-new">
               | 新增 {{ syncResult.new_regulations.length }}
             </span>
             <span v-if="syncResult.changed_regulations.length > 0">
@@ -579,11 +617,13 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
         <!-- 文档类型 -->
         <div class="filter-group">
           <span class="filter-label">类型：</span>
-          <div class="filter-buttons">
+          <div class="filter-buttons" role="tablist" aria-label="文档类型筛选">
             <button
               v-for="option in docTypeOptions"
               :key="option.value"
               :class="['filter-btn', { active: searchState.docType === option.value }]"
+              :aria-selected="searchState.docType === option.value"
+              role="tab"
               @click="handleDocTypeChange(option.value)"
             >
               {{ option.label }}
@@ -594,11 +634,13 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
         <!-- 日期筛选 -->
         <div class="filter-group">
           <span class="filter-label">时间：</span>
-          <div class="filter-buttons">
+          <div class="filter-buttons" role="tablist" aria-label="日期筛选">
             <button
               v-for="option in dateFilterOptions"
               :key="option.value"
               :class="['filter-btn', { active: searchState.dateFilter === option.value }]"
+              :aria-selected="searchState.dateFilter === option.value"
+              role="tab"
               @click="handleDateFilterChange(option.value)"
             >
               {{ option.label }}
@@ -732,6 +774,14 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
                 {{ doc.office_unit }}
               </span>
             </div>
+
+            <!-- eslint-disable vue/no-v-html -- 已通过 sanitizeHtml() 白名单消毒，仅保留 b/em/mark 标签 -->
+            <div
+              v-if="showSnippets && getSnippet(doc.url)"
+              class="card-snippet"
+              v-html="sanitizeHtml(getSnippet(doc.url)!)"
+            ></div>
+            <!-- eslint-enable vue/no-v-html -->
           </div>
 
           <div class="card-actions">
@@ -754,20 +804,28 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
         </div>
       </div>
     </div>
+
+    <!-- Toast 通知 -->
+    <Transition name="toast-slide">
+      <div v-if="toast.visible" :class="['toast-notification', `toast-${toast.type}`]" @click="hideToast">
+        {{ toast.message }}
+      </div>
+    </Transition>
   </div>
 </template>
 
 <style scoped>
 .regulation-panel {
-  --bg-primary: #1a1a1a;
-  --bg-secondary: #242424;
-  --bg-hover: #333;
-  --text-primary: #e0e0e0;
-  --text-secondary: #888;
-  --border-color: #333;
-  --primary-color: #4a9eff;
-  --primary-color-dark: #3a8eef;
-  --primary-color-light: rgba(74, 158, 255, 0.15);
+  /* 统一引用全局主题变量，确保主题切换正常传播 */
+  --bg-primary: var(--color-bg-primary, #1c1c1e);
+  --bg-secondary: var(--color-bg-secondary, #2c2c2e);
+  --bg-hover: var(--color-bg-tertiary, #3a3a3c);
+  --text-primary: var(--color-text-primary, #fff);
+  --text-secondary: var(--color-text-secondary, #ebebf599);
+  --border-color: var(--color-border, #38383a);
+  --primary-color: var(--color-accent, #0a84ff);
+  --primary-color-dark: var(--color-accent-active, #007aff);
+  --primary-color-light: var(--color-accent-light, rgba(10, 132, 255, 0.15));
 
   display: flex;
   flex-direction: column;
@@ -1570,5 +1628,85 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
 
 .open-btn:hover {
   opacity: 0.85;
+}
+
+/* 摘要预览开关 */
+.snippet-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.snippet-toggle-label input[type='checkbox'] {
+  margin: 0;
+  cursor: pointer;
+}
+
+/* 搜索结果摘要 */
+.card-snippet {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--primary-color, #4a9eff);
+  background: var(--bg-secondary, #242424);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary, #888);
+  max-height: 80px;
+  overflow: hidden;
+  word-break: break-all;
+}
+
+.card-snippet :deep(mark) {
+  background: rgba(74, 158, 255, 0.25);
+  color: var(--primary-color, #4a9eff);
+  padding: 0 1px;
+  border-radius: 2px;
+}
+
+/* Toast 通知 */
+.toast-notification {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 24px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #fff;
+  z-index: 9999;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  max-width: 80%;
+  text-align: center;
+  word-break: break-word;
+}
+
+.toast-success {
+  background: #22c55e;
+}
+
+.toast-error {
+  background: #ef4444;
+}
+
+.toast-info {
+  background: var(--primary-color, #4a9eff);
+}
+
+.toast-slide-enter-active,
+.toast-slide-leave-active {
+  transition: all 0.3s ease;
+}
+
+.toast-slide-enter-from,
+.toast-slide-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(16px);
 }
 </style>

@@ -1,3 +1,32 @@
+<script setup lang="ts">
+/**
+ * SettingItem - Single setting row with label and control slot
+ *
+ * Provides a consistent row layout for individual settings:
+ * - Label on the left side
+ * - Control (toggle, slider, input, etc.) on the right side via slot
+ * - Optional help text displayed as tooltip or small text below label
+ * - Border separator between items (except last item)
+ * - Dark theme styling using CSS variables
+ *
+ * @validates Requirements 12.2, 12.5
+ */
+
+interface Props {
+  /** Setting label - displayed on the left side */
+  label: string
+  /** Optional help text - displayed as tooltip on hover icon */
+  helpText?: string
+  /** Show help text below label instead of just tooltip (default: false) */
+  showHelpBelow?: boolean
+}
+
+withDefaults(defineProps<Props>(), {
+  helpText: '',
+  showHelpBelow: false,
+})
+</script>
+
 <template>
   <div class="setting-item">
     <div class="item-label-area">
@@ -28,35 +57,6 @@
     </div>
   </div>
 </template>
-
-<script setup lang="ts">
-/**
- * SettingItem - Single setting row with label and control slot
- *
- * Provides a consistent row layout for individual settings:
- * - Label on the left side
- * - Control (toggle, slider, input, etc.) on the right side via slot
- * - Optional help text displayed as tooltip or small text below label
- * - Border separator between items (except last item)
- * - Dark theme styling using CSS variables
- *
- * @validates Requirements 12.2, 12.5
- */
-
-interface Props {
-  /** Setting label - displayed on the left side */
-  label: string
-  /** Optional help text - displayed as tooltip on hover icon */
-  helpText?: string
-  /** Show help text below label instead of just tooltip (default: false) */
-  showHelpBelow?: boolean
-}
-
-withDefaults(defineProps<Props>(), {
-  helpText: '',
-  showHelpBelow: false,
-})
-</script>
 
 <style scoped>
 .setting-item {

@@ -1,15 +1,3 @@
-<template>
-  <div class="settings-group">
-    <div class="group-header">
-      <h3 class="group-title">{{ title }}</h3>
-      <p v-if="description" class="group-description">{{ description }}</p>
-    </div>
-    <div class="group-content">
-      <slot></slot>
-    </div>
-  </div>
-</template>
-
 <script setup lang="ts">
 /**
  * SettingsGroup - Card-style container for grouping related settings
@@ -32,6 +20,18 @@ interface Props {
 
 defineProps<Props>()
 </script>
+
+<template>
+  <div class="settings-group">
+    <div class="group-header">
+      <h3 class="group-title">{{ title }}</h3>
+      <p v-if="description" class="group-description">{{ description }}</p>
+    </div>
+    <div class="group-content">
+      <slot></slot>
+    </div>
+  </div>
+</template>
 
 <style scoped>
 .settings-group {

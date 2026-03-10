@@ -1,67 +1,3 @@
-<template>
-  <div class="about-section">
-    <!-- App Info Group -->
-    <SettingsGroup :title="$t('settings.about.title')">
-      <!-- Logo and App Name -->
-      <div class="app-header">
-        <img
-          src="/resources/PNG/虎哥截图.png"
-          alt="虎哥截图"
-          class="app-logo"
-          @error="handleLogoError"
-        />
-        <div class="app-info">
-          <h2 class="app-name">{{ appName }}</h2>
-          <span class="app-version">{{ $t('settings.about.version', { version: appVersion }) }}</span>
-        </div>
-      </div>
-
-      <!-- Description -->
-      <p class="app-description">{{ $t('settings.about.description') }}</p>
-    </SettingsGroup>
-
-    <!-- License Group -->
-    <SettingsGroup :title="$t('settings.about.license')">
-      <div class="license-info">
-        <span class="license-type">MIT License</span>
-        <p class="license-text">{{ $t('settings.about.licenseText') }}</p>
-      </div>
-    </SettingsGroup>
-
-    <!-- Third-Party Acknowledgments -->
-    <SettingsGroup :title="$t('settings.about.thirdParty')">
-      <div class="acknowledgments">
-        <div
-          v-for="lib in thirdPartyLibs"
-          :key="lib.name"
-          class="lib-item"
-        >
-          <span class="lib-name">{{ lib.name }}</span>
-          <span class="lib-license">{{ lib.license }}</span>
-        </div>
-      </div>
-    </SettingsGroup>
-
-    <!-- Links Group -->
-    <SettingsGroup :title="$t('settings.about.links')">
-      <div class="link-buttons">
-        <button class="link-btn" @click="openGitHub">
-          <span class="link-icon">📦</span>
-          <span class="link-text">GitHub</span>
-        </button>
-        <button class="link-btn" @click="openIssues">
-          <span class="link-icon">🐛</span>
-          <span class="link-text">{{ $t('settings.about.reportIssue') }}</span>
-        </button>
-        <button class="link-btn" @click="openDocs">
-          <span class="link-icon">📖</span>
-          <span class="link-text">{{ $t('settings.about.documentation') }}</span>
-        </button>
-      </div>
-    </SettingsGroup>
-  </div>
-</template>
-
 <script setup lang="ts">
 /**
  * AboutSection - About Settings Section
@@ -79,8 +15,9 @@
  * @validates Requirements 10.1, 10.2, 10.3, 10.4, 10.5, 10.6
  */
 
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { open } from '@tauri-apps/plugin-shell'
+import { getVersion } from '@tauri-apps/api/app'
 import SettingsGroup from '@/components/settings/controls/SettingsGroup.vue'
 
 // ============================================
@@ -90,8 +27,16 @@ import SettingsGroup from '@/components/settings/controls/SettingsGroup.vue'
 /** Application name */
 const appName = '虎哥截图'
 
-/** Application version - should be read from package.json or Tauri config */
-const appVersion = ref('0.1.0')
+/** Application version - dynamically read from Tauri config */
+const appVersion = ref('...')
+
+onMounted(async () => {
+  try {
+    appVersion.value = await getVersion()
+  } catch {
+    appVersion.value = '0.1.0'
+  }
+})
 
 /** GitHub repository URL */
 const GITHUB_URL = 'https://github.com/hugescreenshot/hugescreenshot'
@@ -164,6 +109,70 @@ async function openDocs(): Promise<void> {
   }
 }
 </script>
+
+<template>
+  <div class="about-section">
+    <!-- App Info Group -->
+    <SettingsGroup :title="$t('settings.about.title')">
+      <!-- Logo and App Name -->
+      <div class="app-header">
+        <img
+          src="/resources/PNG/虎哥截图.png"
+          alt="虎哥截图"
+          class="app-logo"
+          @error="handleLogoError"
+        />
+        <div class="app-info">
+          <h2 class="app-name">{{ appName }}</h2>
+          <span class="app-version">{{ $t('settings.about.version', { version: appVersion }) }}</span>
+        </div>
+      </div>
+
+      <!-- Description -->
+      <p class="app-description">{{ $t('settings.about.description') }}</p>
+    </SettingsGroup>
+
+    <!-- License Group -->
+    <SettingsGroup :title="$t('settings.about.license')">
+      <div class="license-info">
+        <span class="license-type">MIT License</span>
+        <p class="license-text">{{ $t('settings.about.licenseText') }}</p>
+      </div>
+    </SettingsGroup>
+
+    <!-- Third-Party Acknowledgments -->
+    <SettingsGroup :title="$t('settings.about.thirdParty')">
+      <div class="acknowledgments">
+        <div
+          v-for="lib in thirdPartyLibs"
+          :key="lib.name"
+          class="lib-item"
+        >
+          <span class="lib-name">{{ lib.name }}</span>
+          <span class="lib-license">{{ lib.license }}</span>
+        </div>
+      </div>
+    </SettingsGroup>
+
+    <!-- Links Group -->
+    <SettingsGroup :title="$t('settings.about.links')">
+      <div class="link-buttons">
+        <button class="link-btn" @click="openGitHub">
+          <span class="link-icon">📦</span>
+          <span class="link-text">GitHub</span>
+        </button>
+        <button class="link-btn" @click="openIssues">
+          <span class="link-icon">🐛</span>
+          <span class="link-text">{{ $t('settings.about.reportIssue') }}</span>
+        </button>
+        <button class="link-btn" @click="openDocs">
+          <span class="link-icon">📖</span>
+          <span class="link-text">{{ $t('settings.about.documentation') }}</span>
+        </button>
+      </div>
+    </SettingsGroup>
+  </div>
+</template>
 
 <style scoped>
 .about-section {
