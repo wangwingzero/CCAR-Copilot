@@ -11,8 +11,8 @@ use tantivy::schema::Schema;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 use tracing::{debug, info, warn};
 
-use crate::error::HuGeError;
 use super::schema::{RegulationDocument, RegulationFields};
+use crate::error::HuGeError;
 
 /// 索引内存预算（64MB）
 const INDEX_MEMORY_BUDGET: usize = 64 * 1024 * 1024;
@@ -20,7 +20,8 @@ const INDEX_MEMORY_BUDGET: usize = 64 * 1024 * 1024;
 /// 索引 Schema 版本号
 /// v1: content 字段仅 TEXT（不存储）
 /// v2: content 字段 TEXT | STORED（支持搜索摘要）
-const INDEX_SCHEMA_VERSION: u32 = 2;
+/// v3: url 字段 STRING | STORED（支持按 url 做 TermQuery / delete_term，修复一键对齐文件名）
+const INDEX_SCHEMA_VERSION: u32 = 3;
 
 /// 规章索引管理器
 pub struct RegulationIndex {
@@ -46,19 +47,25 @@ impl RegulationIndex {
         info!("初始化规章索引: {:?}", index_path);
 
         // 确保目录存在
-        std::fs::create_dir_all(&index_path).map_err(|e| {
-            HuGeError::Internal(format!("创建索引目录失败: {}", e))
-        })?;
+        std::fs::create_dir_all(&index_path)
+            .map_err(|e| HuGeError::Internal(format!("创建索引目录失败: {}", e)))?;
 
-        // 检查 Schema 版本，不匹配时删除旧索引
+        // 检查 Schema 版本：能保留 content 的版本走数据迁移，其它情况删除重建
         let version_file = index_path.join(".schema_version");
         let current_version = Self::read_schema_version(&version_file);
         if current_version != INDEX_SCHEMA_VERSION && index_path.join("meta.json").exists() {
-            info!(
-                "索引 Schema 版本不匹配 (当前: {}, 需要: {})，删除旧索引以重建",
-                current_version, INDEX_SCHEMA_VERSION
-            );
-            Self::delete_index_files(&index_path)?;
+            // v2→v3：content 已 STORED，可整体抢救出来回写新 schema，无需用户重做 OCR
+            if current_version == 2 {
+                info!("索引 Schema v2→v3 迁移：开始抢救已索引文档");
+                Self::migrate_v2_to_v3(&index_path)?;
+                info!("索引 Schema v2→v3 迁移完成");
+            } else {
+                info!(
+                    "索引 Schema 版本不匹配 (当前: {}, 需要: {})，删除旧索引以重建",
+                    current_version, INDEX_SCHEMA_VERSION
+                );
+                Self::delete_index_files(&index_path)?;
+            }
         }
 
         // 构建 Schema
@@ -67,14 +74,12 @@ impl RegulationIndex {
         // 打开或创建索引
         let index = if index_path.join("meta.json").exists() {
             info!("打开已有索引");
-            Index::open_in_dir(&index_path).map_err(|e| {
-                HuGeError::Internal(format!("打开索引失败: {}", e))
-            })?
+            Index::open_in_dir(&index_path)
+                .map_err(|e| HuGeError::Internal(format!("打开索引失败: {}", e)))?
         } else {
             info!("创建新索引");
-            Index::create_in_dir(&index_path, schema.clone()).map_err(|e| {
-                HuGeError::Internal(format!("创建索引失败: {}", e))
-            })?
+            Index::create_in_dir(&index_path, schema.clone())
+                .map_err(|e| HuGeError::Internal(format!("创建索引失败: {}", e)))?
         };
 
         // 注册中文分词器
@@ -109,7 +114,7 @@ impl RegulationIndex {
 
     /// 注册中文分词器
     fn register_chinese_tokenizer(index: &Index) -> Result<(), HuGeError> {
-        use tantivy::tokenizer::{LowerCaser, TextAnalyzer, RemoveLongFilter};
+        use tantivy::tokenizer::{LowerCaser, RemoveLongFilter, TextAnalyzer};
 
         // 使用 jieba 分词器
         let chinese_tokenizer = TextAnalyzer::builder(JiebaTokenizer)
@@ -129,13 +134,14 @@ impl RegulationIndex {
     pub fn add_document(&self, doc: &RegulationDocument) -> Result<(), HuGeError> {
         let tantivy_doc = doc.to_tantivy_doc(&self.fields);
 
-        let writer = self.writer.write().map_err(|e| {
-            HuGeError::Internal(format!("获取 Writer 锁失败: {}", e))
-        })?;
+        let writer = self
+            .writer
+            .write()
+            .map_err(|e| HuGeError::Internal(format!("获取 Writer 锁失败: {}", e)))?;
 
-        writer.add_document(tantivy_doc).map_err(|e| {
-            HuGeError::Internal(format!("添加文档失败: {}", e))
-        })?;
+        writer
+            .add_document(tantivy_doc)
+            .map_err(|e| HuGeError::Internal(format!("添加文档失败: {}", e)))?;
 
         debug!("文档已添加到索引: {}", doc.title);
         Ok(())
@@ -143,9 +149,10 @@ impl RegulationIndex {
 
     /// 批量添加文档
     pub fn add_documents(&self, docs: &[RegulationDocument]) -> Result<usize, HuGeError> {
-        let writer = self.writer.write().map_err(|e| {
-            HuGeError::Internal(format!("获取 Writer 锁失败: {}", e))
-        })?;
+        let writer = self
+            .writer
+            .write()
+            .map_err(|e| HuGeError::Internal(format!("获取 Writer 锁失败: {}", e)))?;
 
         let mut count = 0;
         for doc in docs {
@@ -161,19 +168,18 @@ impl RegulationIndex {
 
     /// 提交索引更改
     pub fn commit(&self) -> Result<(), HuGeError> {
-        let mut writer = self.writer.write().map_err(|e| {
-            HuGeError::Internal(format!("获取 Writer 锁失败: {}", e))
-        })?;
+        let mut writer = self
+            .writer
+            .write()
+            .map_err(|e| HuGeError::Internal(format!("获取 Writer 锁失败: {}", e)))?;
 
-        writer.commit().map_err(|e| {
-            HuGeError::Internal(format!("提交索引失败: {}", e))
-        })?;
+        writer.commit().map_err(|e| HuGeError::Internal(format!("提交索引失败: {}", e)))?;
         drop(writer);
 
         // OnCommitWithDelay 是异步刷新；这里显式 reload 让调用方在 commit 后立即可见结果
-        self.reader.reload().map_err(|e| {
-            HuGeError::Internal(format!("刷新索引读取器失败: {}", e))
-        })?;
+        self.reader
+            .reload()
+            .map_err(|e| HuGeError::Internal(format!("刷新索引读取器失败: {}", e)))?;
 
         info!("索引已提交");
         Ok(())
@@ -187,7 +193,11 @@ impl RegulationIndex {
     ///
     /// # Returns
     /// * `Ok(Vec<RegulationDocument>)` - 搜索结果
-    pub fn search(&self, query_str: &str, limit: usize) -> Result<Vec<RegulationDocument>, HuGeError> {
+    pub fn search(
+        &self,
+        query_str: &str,
+        limit: usize,
+    ) -> Result<Vec<RegulationDocument>, HuGeError> {
         if query_str.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -198,11 +208,7 @@ impl RegulationIndex {
         // doc_number 是 STRING 类型，用于精确匹配，不参与全文搜索
         let mut query_parser = QueryParser::for_index(
             &self.index,
-            vec![
-                self.fields.title,
-                self.fields.office_unit,
-                self.fields.content,
-            ],
+            vec![self.fields.title, self.fields.office_unit, self.fields.content],
         );
 
         // 设置字段权重：标题 >> 发布单位 > 正文
@@ -261,9 +267,9 @@ impl RegulationIndex {
         query_parser.set_field_boost(self.fields.office_unit, 5.0);
         query_parser.set_field_boost(self.fields.content, 0.5);
 
-        let text_query = query_parser.parse_query(query_str).map_err(|e| {
-            HuGeError::Internal(format!("解析查询失败: {}", e))
-        })?;
+        let text_query = query_parser
+            .parse_query(query_str)
+            .map_err(|e| HuGeError::Internal(format!("解析查询失败: {}", e)))?;
 
         // 收集过滤条件作为 MUST 子句
         let mut clauses: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
@@ -272,7 +278,7 @@ impl RegulationIndex {
         if let Some(v) = validity {
             let term_values: Vec<&str> = match v {
                 "valid" => vec!["有效"],
-                "invalid" => vec!["失效", "废止"],
+                "invalid" => vec!["失效", "废止", "历史版本"],
                 _ => vec![],
             };
             if term_values.len() == 1 {
@@ -296,9 +302,34 @@ impl RegulationIndex {
 
         if let Some(t) = doc_type {
             if t != "all" {
-                let term = Term::from_field_text(self.fields.doc_type, t);
-                let tq = TermQuery::new(term, IndexRecordOption::Basic);
-                clauses.push((tantivy::query::Occur::Must, Box::new(tq)));
+                let term_values: Vec<&str> = match t {
+                    "normative" => vec![
+                        "normative",
+                        "advisory_circular",
+                        "information_bulletin",
+                        "management_document",
+                        "administrative_procedure",
+                    ],
+                    _ => vec![t],
+                };
+
+                if term_values.len() == 1 {
+                    let term = Term::from_field_text(self.fields.doc_type, term_values[0]);
+                    let tq = TermQuery::new(term, IndexRecordOption::Basic);
+                    clauses.push((tantivy::query::Occur::Must, Box::new(tq)));
+                } else {
+                    let sub: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> =
+                        term_values
+                            .iter()
+                            .map(|val| {
+                                let term = Term::from_field_text(self.fields.doc_type, val);
+                                let tq: Box<dyn tantivy::query::Query> =
+                                    Box::new(TermQuery::new(term, IndexRecordOption::Basic));
+                                (tantivy::query::Occur::Should, tq)
+                            })
+                            .collect();
+                    clauses.push((tantivy::query::Occur::Must, Box::new(BooleanQuery::new(sub))));
+                }
             }
         }
 
@@ -315,8 +346,13 @@ impl RegulationIndex {
             }
         }
 
-        debug!("搜索 '{}' (filter: validity={:?}, doc_type={:?}) 返回 {} 条结果",
-            query_str, validity, doc_type, results.len());
+        debug!(
+            "搜索 '{}' (filter: validity={:?}, doc_type={:?}) 返回 {} 条结果",
+            query_str,
+            validity,
+            doc_type,
+            results.len()
+        );
         Ok(results)
     }
 
@@ -326,28 +362,146 @@ impl RegulationIndex {
         searcher.num_docs()
     }
 
+    /// 导出索引中已存储的全部文档。
+    ///
+    /// 用于构建 AI 知识库快照。content 字段在 schema v2 起为 STORED，
+    /// 因此这里可以直接取回正文，不需要重新读取 PDF。
+    pub fn all_documents(&self) -> Result<Vec<RegulationDocument>, HuGeError> {
+        use tantivy::query::AllQuery;
+
+        let searcher = self.reader.searcher();
+        let limit = searcher.num_docs() as usize;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let top_docs = searcher
+            .search(&AllQuery, &TopDocs::with_limit(limit))
+            .map_err(|e| HuGeError::Internal(format!("导出索引文档失败: {}", e)))?;
+
+        let mut documents = Vec::with_capacity(top_docs.len());
+        for (_score, doc_address) in top_docs {
+            if let Ok(doc) = searcher.doc::<TantivyDocument>(doc_address) {
+                documents.push(RegulationDocument::from_tantivy_doc(&doc, &self.fields));
+            }
+        }
+
+        Ok(documents)
+    }
+
     /// 删除所有文档（重建索引）
     pub fn clear(&self) -> Result<(), HuGeError> {
-        let mut writer = self.writer.write().map_err(|e| {
-            HuGeError::Internal(format!("获取 Writer 锁失败: {}", e))
-        })?;
+        let mut writer = self
+            .writer
+            .write()
+            .map_err(|e| HuGeError::Internal(format!("获取 Writer 锁失败: {}", e)))?;
 
-        writer.delete_all_documents().map_err(|e| {
-            HuGeError::Internal(format!("删除文档失败: {}", e))
-        })?;
+        writer
+            .delete_all_documents()
+            .map_err(|e| HuGeError::Internal(format!("删除文档失败: {}", e)))?;
 
-        writer.commit().map_err(|e| {
-            HuGeError::Internal(format!("提交失败: {}", e))
-        })?;
+        writer.commit().map_err(|e| HuGeError::Internal(format!("提交失败: {}", e)))?;
 
         info!("索引已清空");
         Ok(())
     }
 
+    /// 按 URL 批量删除文档（用于强制重建某些文件的 OCR 索引）
+    ///
+    /// 注意：调用方负责确保 url 与索引中的 STRING 字段精确匹配。
+    /// 删除后会调用 `commit()`，使变更立即可见。
+    pub fn delete_by_urls(&self, urls: &[String]) -> Result<usize, HuGeError> {
+        if urls.is_empty() {
+            return Ok(0);
+        }
+        let mut writer = self
+            .writer
+            .write()
+            .map_err(|e| HuGeError::Internal(format!("获取 Writer 锁失败: {}", e)))?;
+
+        for url in urls {
+            let term = tantivy::Term::from_field_text(self.fields.url, url);
+            writer.delete_term(term);
+        }
+        writer.commit().map_err(|e| HuGeError::Internal(format!("提交失败: {}", e)))?;
+        info!("从索引删除 {} 个文档", urls.len());
+        Ok(urls.len())
+    }
+
+    /// 按 URL 批量更新文档的 `file_path` 字段。
+    ///
+    /// Tantivy 不支持原地更新单字段，必须 `delete_term` + 重新 `add_document`。
+    /// 本方法在内部完成"读取整个文档 → 修改 file_path → 重新写入"的循环，
+    /// 一次 commit，避免反复刷新读者带来的开销。
+    ///
+    /// `updates` 为 `(url, new_file_path)` 列表。返回成功更新的文档数。
+    /// 找不到对应 url 的条目会被静默跳过。
+    pub fn update_file_paths_by_url(
+        &self,
+        updates: &[(String, String)],
+    ) -> Result<usize, HuGeError> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+
+        use tantivy::query::TermQuery;
+        use tantivy::schema::IndexRecordOption;
+        use tantivy::Term;
+        use tantivy::TantivyDocument;
+
+        let searcher = self.reader.searcher();
+        let mut writer = self
+            .writer
+            .write()
+            .map_err(|e| HuGeError::Internal(format!("获取 Writer 锁失败: {}", e)))?;
+
+        let mut updated = 0usize;
+
+        for (url, new_file_path) in updates {
+            let term = Term::from_field_text(self.fields.url, url);
+            let query = TermQuery::new(term.clone(), IndexRecordOption::Basic);
+            let top_docs = searcher
+                .search(&query, &TopDocs::with_limit(1))
+                .map_err(|e| HuGeError::Internal(format!("查询索引失败: {}", e)))?;
+
+            let Some((_, addr)) = top_docs.first() else {
+                debug!("索引中未找到 url={}, 跳过", url);
+                continue;
+            };
+
+            let tdoc: TantivyDocument = searcher
+                .doc(*addr)
+                .map_err(|e| HuGeError::Internal(format!("读取索引文档失败: {}", e)))?;
+            let mut reg_doc = RegulationDocument::from_tantivy_doc(&tdoc, &self.fields);
+            reg_doc.file_path = new_file_path.clone();
+
+            writer.delete_term(term);
+            writer
+                .add_document(reg_doc.to_tantivy_doc(&self.fields))
+                .map_err(|e| HuGeError::Internal(format!("更新索引文档失败: {}", e)))?;
+
+            updated += 1;
+        }
+
+        writer
+            .commit()
+            .map_err(|e| HuGeError::Internal(format!("提交索引失败: {}", e)))?;
+        drop(writer);
+        self.reader
+            .reload()
+            .map_err(|e| HuGeError::Internal(format!("刷新索引读取器失败: {}", e)))?;
+
+        info!("索引已批量更新 {} 个文档的 file_path", updated);
+        Ok(updated)
+    }
+
     /// 按文号精确搜索
     ///
     /// 文号是 STRING 类型字段，需要精确匹配（如 "CCAR-121-R7"）
-    pub fn search_by_doc_number(&self, doc_number: &str) -> Result<Option<RegulationDocument>, HuGeError> {
+    pub fn search_by_doc_number(
+        &self,
+        doc_number: &str,
+    ) -> Result<Option<RegulationDocument>, HuGeError> {
         use tantivy::query::TermQuery;
         use tantivy::schema::IndexRecordOption;
         use tantivy::Term;
@@ -409,11 +563,84 @@ impl RegulationIndex {
         }
     }
 
+    /// v2 → v3 索引迁移：保留 content，把 url 字段从「仅 STORED」升级到「STRING | STORED」。
+    ///
+    /// v3 之前 `url` 字段没建倒排索引，导致 `delete_by_urls` / `update_file_paths_by_url`
+    /// 这类基于 url 的 `TermQuery` 操作直接报 `Schema error: 'Field "url" is not indexed.'`
+    /// （症状是「一键对齐文件名」对未对齐文件失败）。
+    ///
+    /// v2 起 content 字段是 STORED，所以可以从旧索引读出全部文档（用 `AllQuery`，不依赖
+    /// url 字段索引），删旧 segment 后用新 schema 重新写一遍，正文不丢，**不需要用户重做 OCR**。
+    ///
+    /// 字段在 [`RegulationFields::build_schema`] 中的注册顺序在 v2/v3 之间完全一致，
+    /// 因此用新 schema 构建的 `RegulationFields` 上的 Field 编号能正确读取旧 segment。
+    fn migrate_v2_to_v3(index_path: &std::path::Path) -> Result<(), HuGeError> {
+        use tantivy::query::AllQuery;
+
+        // 1) 用旧 segment 自带的 schema（从 meta.json 加载）打开旧索引
+        let old_index = Index::open_in_dir(index_path)
+            .map_err(|e| HuGeError::Internal(format!("打开旧索引失败: {}", e)))?;
+        let old_reader = old_index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()
+            .map_err(|e| HuGeError::Internal(format!("创建旧索引 Reader 失败: {}", e)))?;
+
+        // 2) 用新 schema 的 fields 解码旧 segment：字段顺序与 v2 完全一致，Field 编号匹配
+        let (_, fields) = RegulationFields::build_schema();
+        let searcher = old_reader.searcher();
+        let total = searcher.num_docs() as usize;
+
+        let documents: Vec<RegulationDocument> = if total == 0 {
+            Vec::new()
+        } else {
+            let top_docs = searcher
+                .search(&AllQuery, &TopDocs::with_limit(total))
+                .map_err(|e| HuGeError::Internal(format!("导出旧索引文档失败: {}", e)))?;
+            let mut out = Vec::with_capacity(top_docs.len());
+            for (_score, addr) in top_docs {
+                if let Ok(doc) = searcher.doc::<TantivyDocument>(addr) {
+                    out.push(RegulationDocument::from_tantivy_doc(&doc, &fields));
+                }
+            }
+            out
+        };
+        info!("v2→v3 迁移：从旧索引导出 {} 篇文档", documents.len());
+
+        // 3) 释放旧索引句柄再删文件（Windows 下不释放无法删除）
+        drop(searcher);
+        drop(old_reader);
+        drop(old_index);
+        Self::delete_index_files(index_path)?;
+
+        // 4) 用新 schema 重建索引并把全部文档写回
+        let (schema, fields) = RegulationFields::build_schema();
+        let new_index = Index::create_in_dir(index_path, schema)
+            .map_err(|e| HuGeError::Internal(format!("创建新索引失败: {}", e)))?;
+        // 迁移阶段也要注册 jieba：title/office_unit/content 是 TEXT 字段，写入时会分词，
+        // 没 jieba 就退化成 SimpleTokenizer，中文搜索会失效到下次进程重启
+        Self::register_chinese_tokenizer(&new_index)?;
+        {
+            let mut writer = new_index
+                .writer(INDEX_MEMORY_BUDGET)
+                .map_err(|e| HuGeError::Internal(format!("创建迁移 Writer 失败: {}", e)))?;
+            for doc in &documents {
+                writer
+                    .add_document(doc.to_tantivy_doc(&fields))
+                    .map_err(|e| HuGeError::Internal(format!("回写迁移文档失败: {}", e)))?;
+            }
+            writer
+                .commit()
+                .map_err(|e| HuGeError::Internal(format!("提交迁移失败: {}", e)))?;
+        }
+        info!("v2→v3 迁移：已回写 {} 篇文档到新 schema", documents.len());
+        Ok(())
+    }
+
     /// 删除索引目录下的所有文件（保留目录本身）
     fn delete_index_files(index_path: &std::path::Path) -> Result<(), HuGeError> {
-        let entries = std::fs::read_dir(index_path).map_err(|e| {
-            HuGeError::Internal(format!("读取索引目录失败: {}", e))
-        })?;
+        let entries = std::fs::read_dir(index_path)
+            .map_err(|e| HuGeError::Internal(format!("读取索引目录失败: {}", e)))?;
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -468,12 +695,7 @@ impl<'a> JiebaTokenStream<'a> {
             .filter(|s| !s.trim().is_empty())
             .collect();
 
-        Self {
-            tokens,
-            index: 0,
-            offset: 0,
-            token: tantivy::tokenizer::Token::default(),
-        }
+        Self { tokens, index: 0, offset: 0, token: tantivy::tokenizer::Token::default() }
     }
 }
 

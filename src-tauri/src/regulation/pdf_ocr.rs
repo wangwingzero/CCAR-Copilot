@@ -59,6 +59,25 @@ pub enum PdfOcrError {
     FileNotFound(String),
 }
 
+/// 检测文本是否包含大量乱码/替换字符（PUA 区域）
+fn has_excessive_garbled_chars(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let total = text.chars().count();
+    let garbled = text
+        .chars()
+        .filter(|c| {
+            let cp = *c as u32;
+            (0xE000..=0xF8FF).contains(&cp)
+                || (0xF0000..=0xFFFFD).contains(&cp)
+                || (0x100000..=0x10FFFD).contains(&cp)
+                || cp == 0xFFFD
+        })
+        .count();
+    (garbled as f64 / total as f64) > 0.1
+}
+
 /// 获取 pdfium.dll 的搜索路径列表
 ///
 /// 按优先级返回：
@@ -98,11 +117,9 @@ pub(crate) fn create_pdfium() -> Result<Pdfium, PdfOcrError> {
             debug!("找到 pdfium.dll: {:?}", path);
             let parent_dir = path.parent().unwrap_or(Path::new("."));
 
-            match Pdfium::bind_to_library(
-                Pdfium::pdfium_platform_library_name_at_path(
-                    parent_dir.to_str().unwrap_or(".")
-                )
-            ) {
+            match Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(
+                parent_dir.to_str().unwrap_or("."),
+            )) {
                 Ok(bindings) => {
                     info!("PDFium 库加载成功: {:?}", path);
                     return Ok(Pdfium::new(bindings));
@@ -123,11 +140,8 @@ pub(crate) fn create_pdfium() -> Result<Pdfium, PdfOcrError> {
             Ok(Pdfium::new(bindings))
         }
         Err(e) => {
-            let searched = search_paths
-                .iter()
-                .map(|p| format!("  - {:?}", p))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let searched =
+                search_paths.iter().map(|p| format!("  - {:?}", p)).collect::<Vec<_>>().join("\n");
             Err(PdfOcrError::LibraryLoadError(format!(
                 "无法加载 pdfium.dll。已搜索:\n{}\n系统 PATH 也未找到。\n错误: {:?}",
                 searched, e
@@ -164,7 +178,8 @@ pub fn ocr_pdf(
     let pdfium = create_pdfium()?;
 
     // 打开 PDF
-    let document = pdfium.load_pdf_from_file(pdf_path, None)
+    let document = pdfium
+        .load_pdf_from_file(pdf_path, None)
         .map_err(|e| PdfOcrError::PdfOpenError(format!("{}: {:?}", pdf_path, e)))?;
 
     let page_count = document.pages().len() as usize;
@@ -184,44 +199,40 @@ pub fn ocr_pdf(
             cb(i + 1, pages_to_process);
         }
 
-        let page = document.pages().get(i as u16)
+        let page = document
+            .pages()
+            .get(i as u16)
             .map_err(|e| PdfOcrError::RenderError(format!("获取第 {} 页失败: {:?}", i + 1, e)))?;
 
         // 1. 先尝试提取 PDF 原生文本
-        let native_text = page.text()
-            .map(|t| t.all())
-            .unwrap_or_default();
+        let native_text = page.text().map(|t| t.all()).unwrap_or_default();
 
-        if native_text.len() > 50 {
-            // 原生文本足够，直接使用
+        if native_text.len() > 50 && !has_excessive_garbled_chars(&native_text) {
+            // 原生文本足够且质量合格，直接使用
             debug!("第 {} 页: 原生文本 {} 字符", i + 1, native_text.len());
             all_texts.push(native_text);
             continue;
         }
 
-        // 2. 原生文本不足，渲染为图片并 OCR
-        debug!("第 {} 页: 原生文本不足 ({} 字符), 执行 OCR", i + 1, native_text.len());
+        // 2. 原生文本不足或质量差，渲染为图片并 OCR
+        let reason = if native_text.len() <= 50 { "文本不足" } else { "检测到乱码" };
+        debug!("第 {} 页: {} ({} 字符), 执行 OCR", i + 1, reason, native_text.len());
 
         match render_page_to_image(&page) {
-            Ok(dynamic_image) => {
-                match ocr_engine.recognize_image(&dynamic_image) {
-                    Ok(ocr_result) => {
-                        let text_len = ocr_result.text.len();
-                        let elapse = ocr_result.elapse;
-                        if !ocr_result.text.is_empty() {
-                            all_texts.push(ocr_result.text);
-                            ocr_pages += 1;
-                            debug!(
-                                "第 {} 页 OCR 成功: {} 字符, {:.2}s",
-                                i + 1, text_len, elapse
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        warn!("第 {} 页 OCR 失败: {}", i + 1, e);
+            Ok(dynamic_image) => match ocr_engine.recognize_image(&dynamic_image) {
+                Ok(ocr_result) => {
+                    let text_len = ocr_result.text.len();
+                    let elapse = ocr_result.elapse;
+                    if !ocr_result.text.is_empty() {
+                        all_texts.push(ocr_result.text);
+                        ocr_pages += 1;
+                        debug!("第 {} 页 OCR 成功: {} 字符, {:.2}s", i + 1, text_len, elapse);
                     }
                 }
-            }
+                Err(e) => {
+                    warn!("第 {} 页 OCR 失败: {}", i + 1, e);
+                }
+            },
             Err(e) => {
                 warn!("第 {} 页渲染失败: {}", i + 1, e);
             }
@@ -233,7 +244,11 @@ pub fn ocr_pdf(
 
     info!(
         "PDF OCR 完成: {}, 页数={}, OCR页数={}, 文本长度={}, 耗时={:.2}s",
-        pdf_path, page_count, ocr_pages, full_text.len(), elapsed
+        pdf_path,
+        page_count,
+        ocr_pages,
+        full_text.len(),
+        elapsed
     );
 
     Ok(PdfOcrResult {

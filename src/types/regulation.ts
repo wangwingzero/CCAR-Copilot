@@ -111,6 +111,10 @@ export interface RegulationSyncCompareResponse {
   changed_regulations: RegulationDiff[]
   /** 仅本地有 */
   local_only: number
+  /** 本次同步下载成功数（前端补充） */
+  downloaded?: number
+  /** 本次同步下载失败数（前端补充） */
+  download_failed?: number
 }
 
 /** 规章变化项 */
@@ -131,6 +135,12 @@ export interface RegulationDiff {
   doc_type: string
   /** 发布日期 */
   publish_date: string
+  /** 签发日期 */
+  sign_date: string
+  /** 发布单位 */
+  office_unit: string
+  /** PDF 下载 URL */
+  pdf_url: string
 }
 
 /** 本地扫描结果 */

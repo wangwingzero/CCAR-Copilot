@@ -55,6 +55,38 @@ export interface AdvancedConfig {
   debugLogPath: string
   /** 便携模式 */
   portableMode: boolean
+  /** 局方文件保存目录（空字符串表示使用默认目录） */
+  regulationStoragePath: string
+  /** 每天自动同步局方官网文件 */
+  regulationAutoSyncEnabled: boolean
+  /** 自动同步仅在 Wi-Fi 连接时执行 */
+  regulationAutoSyncWifiOnly: boolean
+  /** 启用 MinerU 在线 OCR */
+  mineruOcrEnabled: boolean
+  /** 优先使用 MinerU 在线 OCR，失败后回退本地 OCR */
+  mineruOcrPreferOnline: boolean
+  /** MinerU API Key */
+  mineruApiKey: string
+  /** 启用 AI 知识库服务器同步 */
+  knowledgeServerSyncEnabled: boolean
+  /** 局方本地更新完成后自动刷新并同步 AI 知识库 */
+  knowledgeAutoSyncAfterRegulationUpdate: boolean
+  /** AI 知识库同步方式 */
+  knowledgeSyncMode: 'api' | 'ssh'
+  /** AI 知识库 API 地址 */
+  knowledgeApiUrl: string
+  /** AI 知识库 API Token */
+  knowledgeApiToken: string
+  /** AI 知识库服务器地址 */
+  knowledgeServerHost: string
+  /** AI 知识库 SSH 端口 */
+  knowledgeServerPort: number
+  /** AI 知识库 SSH 用户 */
+  knowledgeServerUser: string
+  /** AI 知识库 SSH 私钥路径 */
+  knowledgeServerKeyPath: string
+  /** AI 知识库服务器发布目录 */
+  knowledgeServerRemoteDir: string
 }
 
 /** 完整应用配置 */
@@ -93,5 +125,21 @@ export const DEFAULT_CONFIG: AppConfig = {
     debugLogging: false,
     debugLogPath: '',
     portableMode: false,
+    regulationStoragePath: '',
+    regulationAutoSyncEnabled: false,
+    regulationAutoSyncWifiOnly: true,
+    mineruOcrEnabled: false,
+    mineruOcrPreferOnline: false,
+    mineruApiKey: '',
+    knowledgeServerSyncEnabled: true,
+    knowledgeAutoSyncAfterRegulationUpdate: true,
+    knowledgeSyncMode: 'api',
+    knowledgeApiUrl: 'https://ccar-api.hudawang.cn',
+    knowledgeApiToken: '',
+    knowledgeServerHost: '154.9.27.44',
+    knowledgeServerPort: 7668,
+    knowledgeServerUser: 'root',
+    knowledgeServerKeyPath: 'C:\\Users\\wangh\\.ssh\\154.9.27.44_id_ed25519',
+    knowledgeServerRemoteDir: '/www/wwwroot/ccar-knowledge-data',
   },
 }

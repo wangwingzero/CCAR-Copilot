@@ -39,6 +39,12 @@ pub fn sort_results(results: &mut [RegulationDocument], order: SortOrder) {
 ///
 /// 在文本中用 `<mark>` 标签包裹匹配的关键词。
 /// 先对文本进行 HTML 转义，再插入标记标签，防止 XSS。
+///
+/// 注意：内部使用 `ascii_lower_preserving_bytes` 而不是 `String::to_lowercase()`，
+/// 因为后者对部分 Unicode 字符（如 `İ`→`i\u{0307}`、`ẞ`→`ß`、`Σ`→`σ/ς`）
+/// 会改变字节长度，导致 lower_text 与 result 字节错位，
+/// `match_indices` 返回的 byte index 可能落在 result 中多字节字符（如中文 `飞`）
+/// 的中间，引发 `byte index is not a char boundary` panic。
 pub fn highlight_keywords(text: &str, keywords: &[&str]) -> String {
     // 先 HTML 转义原始文本，防止注入
     let mut result = html_escape(text);
@@ -50,8 +56,8 @@ pub fn highlight_keywords(text: &str, keywords: &[&str]) -> String {
 
         // 关键词也需要转义后再匹配
         let escaped_keyword = html_escape(keyword);
-        let lower_text = result.to_lowercase();
-        let lower_keyword = escaped_keyword.to_lowercase();
+        let lower_text = ascii_lower_preserving_bytes(&result);
+        let lower_keyword = ascii_lower_preserving_bytes(&escaped_keyword);
 
         let mut new_result = String::with_capacity(result.len() + 20);
         let mut last_end = 0;
@@ -71,6 +77,25 @@ pub fn highlight_keywords(text: &str, keywords: &[&str]) -> String {
     result
 }
 
+/// 仅对 ASCII 字符做小写化，非 ASCII 字符原样保留。
+///
+/// 与 `String::to_lowercase()` 不同，本函数保证：
+/// 1. 输出与输入字节长度完全相等
+/// 2. 字节位置一一对应（任何字节索引在两者中都指向同一个字符的同一字节）
+///
+/// 这是高亮 / 摘要等需要"按位置反向定位到原文"场景的关键不变量。
+fn ascii_lower_preserving_bytes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii() {
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// HTML 转义，防止 XSS 注入
 fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -84,10 +109,7 @@ fn html_escape(text: &str) -> String {
 ///
 /// 从查询字符串中提取关键词列表
 pub fn extract_keywords(query: &str) -> Vec<&str> {
-    query
-        .split_whitespace()
-        .filter(|s| !s.is_empty() && s.chars().count() > 1)
-        .collect()
+    query.split_whitespace().filter(|s| !s.is_empty() && s.chars().count() > 1).collect()
 }
 
 /// 计算文本摘要
@@ -99,12 +121,15 @@ pub fn extract_snippet(content: &str, keywords: &[&str], max_length: usize) -> S
     }
 
     let max_chars = max_length.max(1);
-    let lower_content = content.to_lowercase();
+    // 使用 ASCII-only 小写化：保证 lower_content 与 content 的字节布局完全一致，
+    // 否则后续 best_char_pos 可能漂移（详见 ascii_lower_preserving_bytes 文档）。
+    let lower_content = ascii_lower_preserving_bytes(content);
 
     // 查找第一个关键词出现的位置
     let mut best_byte_pos = 0usize;
     for keyword in keywords {
-        if let Some(pos) = lower_content.find(&keyword.to_lowercase()) {
+        let lower_keyword = ascii_lower_preserving_bytes(keyword);
+        if let Some(pos) = lower_content.find(&lower_keyword) {
             best_byte_pos = pos;
             break;
         }
@@ -116,11 +141,8 @@ pub fn extract_snippet(content: &str, keywords: &[&str], max_length: usize) -> S
     let end_char = (start_char + max_chars).min(total_chars);
 
     // 按字符边界提取摘要，避免 UTF-8 多字节字符被错误截断
-    let mut snippet: String = content
-        .chars()
-        .skip(start_char)
-        .take(end_char - start_char)
-        .collect();
+    let mut snippet: String =
+        content.chars().skip(start_char).take(end_char - start_char).collect();
 
     // 添加省略号
     if start_char > 0 {
@@ -195,5 +217,43 @@ mod tests {
         let content = "本规则适用于大型飞机公共航空运输承运人的运行合格审定";
         let snippet = extract_snippet(content, &["飞机"], 20);
         assert!(snippet.contains("飞机"));
+    }
+
+    /// 回归测试：之前 `to_lowercase()` 会把土耳其大写 `İ`（2 字节）
+    /// 展开为 `i\u{0307}`（3 字节），导致 lower_text 与 result 字节错位，
+    /// 切片落到中文字符中间引发 panic：
+    /// `byte index 102 is not a char boundary; it is inside '飞' (bytes 101..104)`
+    #[test]
+    fn test_highlight_keywords_with_unicode_case_changing_chars() {
+        // 含土耳其大写 İ + 大量中文 + 用户搜索词
+        let text = "İstanbul 是城市。飞行程序设计、塔台监视、机场蠕行仿真验证等工程实践都是民航适航专业重点。";
+        let result = highlight_keywords(text, &["飞行"]);
+        // 不应 panic，并且能成功高亮
+        assert!(result.contains("<mark>飞行</mark>"), "result = {}", result);
+    }
+
+    #[test]
+    fn test_highlight_keywords_with_eszett() {
+        // 德语 ẞ (U+1E9E, 3 字节) lowercase 为 ß (U+00DF, 2 字节) - 字节长度变化
+        let text = "STRAẞE 飞行测试";
+        let result = highlight_keywords(text, &["飞行"]);
+        assert!(result.contains("<mark>飞行</mark>"), "result = {}", result);
+    }
+
+    #[test]
+    fn test_highlight_keywords_case_insensitive_ascii() {
+        // 确认 ASCII 大小写不敏感仍工作
+        let text = "Pilot Flight Manual";
+        let result = highlight_keywords(text, &["pilot", "FLIGHT"]);
+        assert!(result.contains("<mark>Pilot</mark>"), "result = {}", result);
+        assert!(result.contains("<mark>Flight</mark>"), "result = {}", result);
+    }
+
+    #[test]
+    fn test_extract_snippet_with_unicode_case_changing_chars() {
+        // 同样的字符在 extract_snippet 里不会崩溃
+        let content = "İstanbul 飞行程序设计、塔台监视、机场蠕行仿真验证等工程实践";
+        let snippet = extract_snippet(content, &["飞行"], 30);
+        assert!(snippet.contains("飞行"), "snippet = {}", snippet);
     }
 }

@@ -16,8 +16,9 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, info};
 
+use super::filename::{build_pretty_filename, dedupe_filename};
+use super::sync::{calculate_bytes_hash, BatchProgress, DownloadResult};
 use crate::error::{HuGeError, HuGeResult};
-use super::sync::{DownloadResult, BatchProgress, calculate_bytes_hash};
 
 /// 下载配置
 #[derive(Debug, Clone)]
@@ -39,7 +40,7 @@ impl Default for DownloadConfig {
         Self {
             save_dir: PathBuf::from("regulations"),
             max_concurrent: 2,
-            delay_ms: 3000,  // 3 秒间隔
+            delay_ms: 3000, // 3 秒间隔
             timeout_secs: 60,
             user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36".to_string(),
         }
@@ -64,19 +65,14 @@ impl RegulationCrawler {
 
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent));
 
-        Ok(Self {
-            client,
-            semaphore,
-            config,
-        })
+        Ok(Self { client, semaphore, config })
     }
 
     /// 确保保存目录存在
     pub fn ensure_save_dir(&self) -> HuGeResult<()> {
         if !self.config.save_dir.exists() {
-            std::fs::create_dir_all(&self.config.save_dir).map_err(|e| {
-                HuGeError::Internal(format!("创建保存目录失败: {}", e))
-            })?;
+            std::fs::create_dir_all(&self.config.save_dir)
+                .map_err(|e| HuGeError::Internal(format!("创建保存目录失败: {}", e)))?;
             info!("创建规章保存目录: {:?}", self.config.save_dir);
         }
         Ok(())
@@ -86,34 +82,40 @@ impl RegulationCrawler {
     ///
     /// # 参数
     /// - `url`: 下载 URL
-    /// - `original_name`: 原始文件名（用于确定扩展名）
+    /// - `doc_number`: 规章文号（可选，用于生成可读文件名）
+    /// - `title`: 规章标题（可选，用于生成可读文件名）
+    /// - `original_name`: 原始文件名（仅用于推断扩展名）
     ///
-    /// # 返回
-    /// 下载结果，包含文件路径和哈希
+    /// # 文件命名规则
+    /// 优先使用 [`build_pretty_filename`] 生成 `{doc_number}_{title}.pdf`，
+    /// 重名冲突由 [`dedupe_filename`] 自动追加 `__<sha前6位>` 后缀。
+    /// 元数据全部缺失时回退到 `<sha前16位>.pdf`（与历史行为一致）。
     pub async fn download_file(
         &self,
         url: &str,
+        doc_number: Option<&str>,
+        title: Option<&str>,
         original_name: Option<&str>,
     ) -> HuGeResult<DownloadResult> {
         // 获取信号量许可
-        let _permit = self.semaphore.acquire().await.map_err(|e| {
-            HuGeError::Internal(format!("获取下载许可失败: {}", e))
-        })?;
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|e| HuGeError::Internal(format!("获取下载许可失败: {}", e)))?;
 
         debug!("开始下载: {}", url);
 
         // 发送请求
-        let response = self.client
+        let response = self
+            .client
             .get(url)
             .send()
             .await
             .map_err(|e| HuGeError::Internal(format!("下载请求失败: {}", e)))?;
 
         if !response.status().is_success() {
-            return Err(HuGeError::Internal(format!(
-                "下载失败，状态码: {}",
-                response.status()
-            )));
+            return Err(HuGeError::Internal(format!("下载失败，状态码: {}", response.status())));
         }
 
         // 获取文件内容
@@ -127,16 +129,27 @@ impl RegulationCrawler {
         // 计算 SHA256
         let sha256 = calculate_bytes_hash(&bytes);
 
-        // 确定保存路径
+        // 确定保存路径：优先用规则化文件名，旁路通道是 sha256 短缀
         let ext = original_name
             .and_then(|n| Path::new(n).extension())
             .and_then(|e| e.to_str())
-            .unwrap_or("pdf");
+            .map(str::to_lowercase)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "pdf".to_string());
 
-        let filename = format!("{}.{}", &sha256[..16], ext);
-        let file_path = self.config.save_dir.join(&filename);
+        let desired_name = build_pretty_filename(doc_number, title, &sha256, &ext);
 
-        // 如果文件已存在且哈希一致，跳过写入
+        // 确保目录存在再做 dedupe 检查
+        std::fs::create_dir_all(&self.config.save_dir).map_err(|e| {
+            HuGeError::Internal(format!(
+                "创建保存目录失败 {:?}: {}",
+                self.config.save_dir, e
+            ))
+        })?;
+
+        let file_path = dedupe_filename(&self.config.save_dir, &desired_name, &sha256);
+
+        // 如果文件已存在（dedupe 之前的同名匹配走 dedupe 逻辑，这里是再次防御），跳过写入
         if file_path.exists() {
             info!("文件已存在，跳过写入: {:?}", file_path);
             return Ok(DownloadResult {
@@ -150,23 +163,21 @@ impl RegulationCrawler {
             });
         }
 
-        // 写入文件（使用临时文件 + 重命名，保证原子性）
+        // 写入文件（使用临时文件 + 重命名，保证原子性）。
+        // 临时文件名仍用 sha256 前 16 位避免与正式文件命名冲突。
         let temp_path = self.config.save_dir.join(format!("{}.tmp", &sha256[..16]));
 
         {
-            let mut file = std::fs::File::create(&temp_path).map_err(|e| {
-                HuGeError::Internal(format!("创建临时文件失败: {}", e))
-            })?;
+            let mut file = std::fs::File::create(&temp_path)
+                .map_err(|e| HuGeError::Internal(format!("创建临时文件失败: {}", e)))?;
 
-            file.write_all(&bytes).map_err(|e| {
-                HuGeError::Internal(format!("写入文件失败: {}", e))
-            })?;
+            file.write_all(&bytes)
+                .map_err(|e| HuGeError::Internal(format!("写入文件失败: {}", e)))?;
         }
 
         // 重命名为正式文件
-        std::fs::rename(&temp_path, &file_path).map_err(|e| {
-            HuGeError::Internal(format!("重命名文件失败: {}", e))
-        })?;
+        std::fs::rename(&temp_path, &file_path)
+            .map_err(|e| HuGeError::Internal(format!("重命名文件失败: {}", e)))?;
 
         info!("下载完成: {} -> {:?} ({} bytes)", url, file_path, file_size);
 
@@ -205,10 +216,7 @@ impl RegulationCrawler {
         self.ensure_save_dir().ok();
 
         let total = items.len();
-        let progress = Arc::new(Mutex::new(BatchProgress {
-            total,
-            ..Default::default()
-        }));
+        let progress = Arc::new(Mutex::new(BatchProgress { total, ..Default::default() }));
 
         let mut results = Vec::with_capacity(total);
 
@@ -221,7 +229,14 @@ impl RegulationCrawler {
             }
 
             // 下载
-            let result = self.download_file(&item.url, item.original_name.as_deref()).await;
+            let result = self
+                .download_file(
+                    &item.url,
+                    item.doc_number.as_deref(),
+                    Some(item.title.as_str()),
+                    item.original_name.as_deref(),
+                )
+                .await;
 
             // 更新进度
             {

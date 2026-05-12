@@ -18,6 +18,8 @@ interface RegulationSearchRequest {
   query: string
   validity?: string
   doc_type?: string
+  start_date?: string
+  end_date?: string
   limit?: number
   sort?: string
 }
@@ -89,6 +91,8 @@ export function useRegulationIndex() {
     options: {
       validity?: RegulationValidity
       docType?: RegulationDocType
+      startDate?: string
+      endDate?: string
       limit?: number
       sort?: RegulationSortOrder
     } = {}
@@ -110,6 +114,8 @@ export function useRegulationIndex() {
         query,
         validity: options.validity || 'all',
         doc_type: options.docType || 'all',
+        start_date: options.startDate || '',
+        end_date: options.endDate || '',
         limit: options.limit || 100,
         sort: options.sort || 'relevance',
       }

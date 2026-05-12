@@ -3,31 +3,27 @@
 //! 负责文件下载的去重、状态跟踪和增量同步。
 
 use serde::Serialize;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-use crate::database::regulation::{
-    self, RegulationFile, SyncStatus,
-};
+use crate::database::regulation::{self, RegulationFile, SyncStatus};
 use crate::error::{HuGeError, HuGeResult};
 
 /// 计算文件的 SHA256 哈希
 pub fn calculate_file_hash(path: &Path) -> HuGeResult<String> {
-    let file = File::open(path).map_err(|e| {
-        HuGeError::Internal(format!("打开文件失败: {}", e))
-    })?;
+    let file = File::open(path).map_err(|e| HuGeError::Internal(format!("打开文件失败: {}", e)))?;
 
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 8192];
 
     loop {
-        let bytes_read = reader.read(&mut buffer).map_err(|e| {
-            HuGeError::Internal(format!("读取文件失败: {}", e))
-        })?;
+        let bytes_read = reader
+            .read(&mut buffer)
+            .map_err(|e| HuGeError::Internal(format!("读取文件失败: {}", e)))?;
 
         if bytes_read == 0 {
             break;
@@ -68,9 +64,8 @@ impl RegulationSync {
     /// 确保保存目录存在
     pub fn ensure_save_dir(&self) -> HuGeResult<()> {
         if !self.save_dir.exists() {
-            std::fs::create_dir_all(&self.save_dir).map_err(|e| {
-                HuGeError::Internal(format!("创建保存目录失败: {}", e))
-            })?;
+            std::fs::create_dir_all(&self.save_dir)
+                .map_err(|e| HuGeError::Internal(format!("创建保存目录失败: {}", e)))?;
             info!("创建规章保存目录: {:?}", self.save_dir);
         }
         Ok(())
@@ -207,8 +202,7 @@ pub struct DownloadResult {
 }
 
 /// 批量下载进度
-#[derive(Debug, Clone, Serialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct BatchProgress {
     /// 总数
     pub total: usize,
@@ -223,7 +217,6 @@ pub struct BatchProgress {
     /// 当前正在处理的 URL
     pub current_url: Option<String>,
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -241,19 +234,13 @@ mod tests {
 
         let hash = calculate_file_hash(&file_path).unwrap();
         // SHA256 of "hello world"
-        assert_eq!(
-            hash,
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
+        assert_eq!(hash, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
     }
 
     #[test]
     fn test_calculate_bytes_hash() {
         let hash = calculate_bytes_hash(b"hello world");
-        assert_eq!(
-            hash,
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
+        assert_eq!(hash, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
     }
 
     #[test]

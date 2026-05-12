@@ -3,7 +3,7 @@
 //! 定义 Tantivy 索引的字段结构和文档数据模型。
 
 use serde::{Deserialize, Serialize};
-use tantivy::schema::{Schema, STORED, STRING, TEXT, Field};
+use tantivy::schema::{Field, Schema, STORED, STRING, TEXT};
 
 /// 规章文档数据模型
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,8 +68,8 @@ impl RegulationFields {
         // 发布日期：存储（用于排序和显示）
         let publish_date = schema_builder.add_text_field("publish_date", STRING | STORED);
 
-        // 原始 URL：仅存储
-        let url = schema_builder.add_text_field("url", STORED);
+        // 原始 URL：精确匹配 + 存储（v3 起；用于 delete_by_urls/update_file_paths_by_url 的 TermQuery）
+        let url = schema_builder.add_text_field("url", STRING | STORED);
 
         // 本地文件路径：仅存储
         let file_path = schema_builder.add_text_field("file_path", STORED);
@@ -98,12 +98,9 @@ impl RegulationDocument {
     /// 从 Tantivy 文档转换
     pub fn from_tantivy_doc(doc: &tantivy::TantivyDocument, fields: &RegulationFields) -> Self {
         use tantivy::schema::Value;
-        
+
         let get_text = |field: Field| -> String {
-            doc.get_first(field)
-                .and_then(|v| Value::as_str(&v))
-                .unwrap_or("")
-                .to_string()
+            doc.get_first(field).and_then(|v| Value::as_str(&v)).unwrap_or("").to_string()
         };
 
         Self {

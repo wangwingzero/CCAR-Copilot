@@ -36,20 +36,28 @@
 //! └─────────────────────────────────────────┘
 //! ```
 
+mod commands;
+mod crawler;
+mod filename;
 mod index;
+mod knowledge;
+mod mineru_ocr;
+pub mod online_search;
+pub mod pdf_ocr;
 mod schema;
 mod search;
 mod sync;
-mod crawler;
 mod text_extractor;
-pub mod pdf_ocr;
-mod commands;
-pub mod online_search;
 
+pub use crawler::{DownloadConfig, DownloadItem, RegulationCrawler};
 pub use index::RegulationIndex;
+pub use online_search::{
+    CaacOnlineSearcher, OnlineDocument, OnlineSearchRequest, OnlineSearchResponse,
+};
 pub use schema::RegulationDocument;
-pub use sync::{RegulationSync, DownloadResult, BatchProgress, calculate_file_hash, calculate_bytes_hash};
-pub use crawler::{RegulationCrawler, DownloadConfig, DownloadItem};
-pub use online_search::{CaacOnlineSearcher, OnlineSearchRequest, OnlineSearchResponse, OnlineDocument};
+pub use sync::{
+    calculate_bytes_hash, calculate_file_hash, BatchProgress, DownloadResult, RegulationSync,
+};
 // 使用通配符导出所有命令（包括 Tauri 宏生成的 __cmd__ 函数）
 pub use commands::*;
+pub use knowledge::*;

@@ -110,10 +110,7 @@ pub struct NotificationConfig {
 
 impl Default for NotificationConfig {
     fn default() -> Self {
-        Self {
-            startup: true,
-            software_update: true,
-        }
+        Self { startup: true, software_update: true }
     }
 }
 
@@ -187,6 +184,54 @@ pub struct AdvancedConfig {
     /// 便携模式
     #[serde(default)]
     pub portable_mode: bool,
+    /// 局方文件保存目录（空字符串表示使用默认 AppData 目录）
+    #[serde(default)]
+    pub regulation_storage_path: String,
+    /// 是否每天自动同步局方官网文件
+    #[serde(default)]
+    pub regulation_auto_sync_enabled: bool,
+    /// 自动同步是否仅在 Wi-Fi 连接时执行
+    #[serde(default = "default_true")]
+    pub regulation_auto_sync_wifi_only: bool,
+    /// 是否启用 MinerU 在线 OCR
+    #[serde(default)]
+    pub mineru_ocr_enabled: bool,
+    /// 是否优先使用 MinerU 在线 OCR，失败后回退本地 OCR
+    #[serde(default)]
+    pub mineru_ocr_prefer_online: bool,
+    /// MinerU API Key
+    #[serde(default)]
+    pub mineru_api_key: String,
+    /// 是否启用 AI 知识库服务器同步
+    #[serde(default = "default_true")]
+    pub knowledge_server_sync_enabled: bool,
+    /// 局方本地更新完成后是否自动刷新并同步 AI 知识库
+    #[serde(default = "default_true")]
+    pub knowledge_auto_sync_after_regulation_update: bool,
+    /// AI 知识库同步方式：api 或 ssh
+    #[serde(default = "default_knowledge_sync_mode")]
+    pub knowledge_sync_mode: String,
+    /// AI 知识库 API 地址
+    #[serde(default = "default_knowledge_api_url")]
+    pub knowledge_api_url: String,
+    /// AI 知识库 API Token
+    #[serde(default)]
+    pub knowledge_api_token: String,
+    /// AI 知识库服务器地址
+    #[serde(default = "default_knowledge_server_host")]
+    pub knowledge_server_host: String,
+    /// AI 知识库 SSH 端口
+    #[serde(default = "default_knowledge_server_port")]
+    pub knowledge_server_port: u16,
+    /// AI 知识库 SSH 用户
+    #[serde(default = "default_knowledge_server_user")]
+    pub knowledge_server_user: String,
+    /// AI 知识库 SSH 私钥路径
+    #[serde(default = "default_knowledge_server_key_path")]
+    pub knowledge_server_key_path: String,
+    /// AI 知识库服务器发布目录
+    #[serde(default = "default_knowledge_server_remote_dir")]
+    pub knowledge_server_remote_dir: String,
 }
 
 fn default_proxy_type() -> String {
@@ -195,6 +240,39 @@ fn default_proxy_type() -> String {
 
 fn default_proxy_port() -> u16 {
     8080
+}
+
+fn default_knowledge_server_host() -> String {
+    "154.9.27.44".to_string()
+}
+
+fn default_knowledge_sync_mode() -> String {
+    "api".to_string()
+}
+
+fn default_knowledge_api_url() -> String {
+    "https://ccar-api.hudawang.cn".to_string()
+}
+
+fn default_knowledge_server_port() -> u16 {
+    7668
+}
+
+fn default_knowledge_server_user() -> String {
+    "root".to_string()
+}
+
+fn default_knowledge_server_key_path() -> String {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ssh")
+        .join("154.9.27.44_id_ed25519")
+        .to_string_lossy()
+        .to_string()
+}
+
+fn default_knowledge_server_remote_dir() -> String {
+    "/www/wwwroot/ccar-knowledge-data".to_string()
 }
 
 impl Default for AdvancedConfig {
@@ -207,6 +285,22 @@ impl Default for AdvancedConfig {
             debug_logging: false,
             debug_log_path: String::new(),
             portable_mode: false,
+            regulation_storage_path: String::new(),
+            regulation_auto_sync_enabled: false,
+            regulation_auto_sync_wifi_only: true,
+            mineru_ocr_enabled: false,
+            mineru_ocr_prefer_online: false,
+            mineru_api_key: String::new(),
+            knowledge_server_sync_enabled: true,
+            knowledge_auto_sync_after_regulation_update: true,
+            knowledge_sync_mode: default_knowledge_sync_mode(),
+            knowledge_api_url: default_knowledge_api_url(),
+            knowledge_api_token: String::new(),
+            knowledge_server_host: default_knowledge_server_host(),
+            knowledge_server_port: default_knowledge_server_port(),
+            knowledge_server_user: default_knowledge_server_user(),
+            knowledge_server_key_path: default_knowledge_server_key_path(),
+            knowledge_server_remote_dir: default_knowledge_server_remote_dir(),
         }
     }
 }

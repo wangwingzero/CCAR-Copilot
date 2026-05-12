@@ -72,6 +72,34 @@ function saveSearchPrefs(prefs: RegulationSearchPrefs): void {
   }
 }
 
+const INVALID_VALIDITY_LABELS = ['失效', '废止', '历史版本'] as const
+
+function isInvalidValidityLabel(value: string): boolean {
+  const normalized = value.trim()
+  return INVALID_VALIDITY_LABELS.some(label => label === normalized)
+}
+
+function inferDocumentValidity(doc: RegulationDocument): string {
+  const explicit = doc.validity.trim()
+  if (isInvalidValidityLabel(explicit)) return explicit
+
+  const searchableText = [doc.title, doc.doc_number, doc.file_path, doc.url].join(' ')
+  return INVALID_VALIDITY_LABELS.find(label => searchableText.includes(label)) ?? explicit
+}
+
+function isInvalidDocument(doc: RegulationDocument): boolean {
+  return isInvalidValidityLabel(inferDocumentValidity(doc))
+}
+
+function filterBySelectedValidity(
+  docs: RegulationDocument[],
+  validity: RegulationValidity
+): RegulationDocument[] {
+  if (validity === 'all') return docs
+  const wantInvalid = validity === 'invalid'
+  return docs.filter(doc => isInvalidDocument(doc) === wantInvalid)
+}
+
 export function useRegulationQuery() {
   const regulationStore = useRegulationStore()
   const regulationIndex = useRegulationIndex()
@@ -118,10 +146,10 @@ export function useRegulationQuery() {
       startDate: searchState.startDate,
       endDate: searchState.endDate,
     }),
-    (newPrefs) => {
+    newPrefs => {
       saveSearchPrefs(newPrefs)
     },
-    { deep: true },
+    { deep: true }
   )
 
   /** 当前下载的文档 */
@@ -151,14 +179,10 @@ export function useRegulationQuery() {
   // ============================================
 
   /** 有效文档数量 */
-  const validCount = computed(() =>
-    results.value.filter((d: RegulationDocument) => d.validity === '有效').length
-  )
+  const validCount = computed(() => results.value.filter(doc => !isInvalidDocument(doc)).length)
 
   /** 失效文档数量 */
-  const invalidCount = computed(() =>
-    results.value.filter((d: RegulationDocument) => d.validity === '失效' || d.validity === '废止').length
-  )
+  const invalidCount = computed(() => results.value.filter(isInvalidDocument).length)
 
   /** 是否可以搜索（只检查是否正在加载，sidecar 会自动初始化） */
   const canSearch = computed(() => !isLoading.value && !isInitializing.value)
@@ -180,13 +204,22 @@ export function useRegulationQuery() {
 
   /** 摘要预览开关（localStorage 持久化） */
   const SNIPPET_ENABLED_KEY = 'regulation-snippet-enabled'
-  const showSnippets = ref((() => {
+  const showSnippets = ref(
+    (() => {
+      try {
+        const stored = localStorage.getItem(SNIPPET_ENABLED_KEY)
+        return stored === null ? true : stored === 'true'
+      } catch {
+        return true
+      }
+    })()
+  )
+  watch(showSnippets, v => {
     try {
-      return localStorage.getItem(SNIPPET_ENABLED_KEY) === 'true'
-    } catch { return false }
-  })())
-  watch(showSnippets, (v) => {
-    try { localStorage.setItem(SNIPPET_ENABLED_KEY, String(v)) } catch { /* ignore */ }
+      localStorage.setItem(SNIPPET_ENABLED_KEY, String(v))
+    } catch {
+      /* ignore */
+    }
   })
 
   /** 获取指定文档的摘要 */
@@ -207,6 +240,13 @@ export function useRegulationQuery() {
   }
 
   /**
+   * 刷新本地索引统计
+   */
+  async function refreshLocalIndexStats(): Promise<void> {
+    await regulationIndex.refreshStats()
+  }
+
+  /**
    * 本地搜索规章（毫秒级响应）
    * 搜索已下载并索引的文档
    */
@@ -216,14 +256,21 @@ export function useRegulationQuery() {
       return []
     }
 
+    const { startDate, endDate } = getDateRange()
+
     const docs = await regulationIndex.localSearch(searchState.keyword, {
       validity: searchState.validity,
       docType: searchState.docType,
+      startDate,
+      endDate,
       limit: 100,
     })
 
     // 更新结果到 UI（标题匹配优先）
-    results.value = sortByTitleMatch(docs, searchState.keyword)
+    results.value = sortByTitleMatch(
+      filterBySelectedValidity(docs, searchState.validity),
+      searchState.keyword
+    )
 
     return results.value
   }
@@ -245,7 +292,9 @@ export function useRegulationQuery() {
       localResults = await searchLocal()
       if (localResults.length > 0) {
         results.value = localResults
-        console.warn(`[RegulationQuery] 本地搜索返回 ${localResults.length} 条结果，耗时 ${localSearchElapsedMs.value}ms`)
+        console.warn(
+          `[RegulationQuery] 本地搜索返回 ${localResults.length} 条结果，耗时 ${localSearchElapsedMs.value}ms`
+        )
       }
     }
 
@@ -255,26 +304,26 @@ export function useRegulationQuery() {
 
       const { startDate, endDate } = getDateRange()
 
-      const onlineResult = await invoke<RegulationSearchResponse>(
-        'regulation_online_search',
-        {
-          keyword: searchState.keyword,
-          docType: searchState.docType === 'all' ? null : searchState.docType,
-          validity: searchState.validity === 'all' ? null : searchState.validity,
-          startDate: startDate || null,
-          endDate: endDate || null,
-        }
-      )
+      const onlineResult = await invoke<RegulationSearchResponse>('regulation_online_search', {
+        keyword: searchState.keyword,
+        docType: searchState.docType === 'all' ? null : searchState.docType,
+        validity: searchState.validity === 'all' ? null : searchState.validity,
+        startDate: startDate || null,
+        endDate: endDate || null,
+      })
 
       // 3. 合并本地 + 在线结果，按 URL 或标题去重
       const existingUrls = new Set(localResults.map((d: RegulationDocument) => d.url))
       const existingTitles = new Set(localResults.map((d: RegulationDocument) => d.title))
-      const newOnlineDocs = onlineResult.documents.filter(
+      const filteredOnlineDocs = filterBySelectedValidity(onlineResult.documents, searchState.validity)
+      const newOnlineDocs = filteredOnlineDocs.filter(
         (d: RegulationDocument) => !existingUrls.has(d.url) && !existingTitles.has(d.title)
       )
 
       results.value = sortByTitleMatch([...localResults, ...newOnlineDocs], searchState.keyword)
-      console.warn(`[RegulationQuery] 智能搜索: 本地 ${localResults.length} + 在线新增 ${newOnlineDocs.length} = 总计 ${results.value.length}`)
+      console.warn(
+        `[RegulationQuery] 智能搜索: 本地 ${localResults.length} + 在线新增 ${newOnlineDocs.length} = 总计 ${results.value.length}`
+      )
     } catch (err) {
       // 在线搜索失败不影响本地结果
       if (localResults.length === 0) {
@@ -364,18 +413,18 @@ export function useRegulationQuery() {
       const { startDate, endDate } = getDateRange()
 
       // 使用 Rust 原生在线搜索命令（替代 Python Sidecar）
-      const result = await invoke<RegulationSearchResponse>(
-        'regulation_online_search',
-        {
-          keyword: searchState.keyword,
-          docType: searchState.docType === 'all' ? null : searchState.docType,
-          validity: searchState.validity === 'all' ? null : searchState.validity,
-          startDate: startDate || null,
-          endDate: endDate || null,
-        }
-      )
+      const result = await invoke<RegulationSearchResponse>('regulation_online_search', {
+        keyword: searchState.keyword,
+        docType: searchState.docType === 'all' ? null : searchState.docType,
+        validity: searchState.validity === 'all' ? null : searchState.validity,
+        startDate: startDate || null,
+        endDate: endDate || null,
+      })
 
-      results.value = sortByTitleMatch(result.documents, searchState.keyword)
+      results.value = sortByTitleMatch(
+        filterBySelectedValidity(result.documents, searchState.validity),
+        searchState.keyword
+      )
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err)
       results.value = []
@@ -411,7 +460,6 @@ export function useRegulationQuery() {
       })
 
       if (result.success) {
-
         // 下载成功后，添加到本地索引
         try {
           // 构建本地索引文档（添加文件路径）
@@ -478,7 +526,7 @@ export function useRegulationQuery() {
       error.value = null
 
       // 构建下载项
-      const items = documents.map((doc) => ({
+      const items = documents.map(doc => ({
         url: doc.pdf_url || doc.url,
         title: doc.title,
         doc_number: doc.doc_number || '',
@@ -552,7 +600,7 @@ export function useRegulationQuery() {
    */
   async function scanLocalDir(
     dirPath: string,
-    recursive = true,
+    recursive = true
   ): Promise<RegulationScanResponse | null> {
     if (regulationStore.isScanning) {
       return null
@@ -561,15 +609,11 @@ export function useRegulationQuery() {
     error.value = null
 
     // 使用全局 store 管理扫描生命周期
-    const result = await regulationStore.startScan(
-      dirPath,
-      recursive,
-      async () => {
-        if (!regulationIndex.isInitialized.value) {
-          await regulationIndex.initIndex()
-        }
-      },
-    )
+    const result = await regulationStore.startScan(dirPath, recursive, async () => {
+      if (!regulationIndex.isInitialized.value) {
+        await regulationIndex.initIndex()
+      }
+    })
 
     // 扫描完成后刷新索引统计
     if (result) {
@@ -615,6 +659,7 @@ export function useRegulationQuery() {
   async function syncCompare(
     docType: string = 'all',
     maxPages: number = 20,
+    downloadMissing = false
   ): Promise<RegulationSyncCompareResponse | null> {
     if (regulationStore.isSyncing) {
       return null
@@ -632,10 +677,43 @@ export function useRegulationQuery() {
         }
       )
 
+      if (downloadMissing && compareResult.new_regulations.length > 0) {
+        let downloaded = 0
+        let downloadFailed = 0
+
+        const missingDocs: RegulationDocument[] = compareResult.new_regulations.map(reg => ({
+          title: reg.title,
+          doc_number: reg.doc_number || '',
+          validity: reg.online_validity || '',
+          doc_type: reg.doc_type as RegulationDocType,
+          office_unit: reg.office_unit || '',
+          sign_date: reg.sign_date || '',
+          publish_date: reg.publish_date || '',
+          url: reg.url,
+          pdf_url: reg.pdf_url || undefined,
+          file_path: '',
+          content: '',
+        }))
+
+        for (const doc of missingDocs) {
+          const filePath = await download(doc)
+          if (filePath) {
+            downloaded += 1
+          } else {
+            downloadFailed += 1
+          }
+        }
+
+        compareResult.downloaded = downloaded
+        compareResult.download_failed = downloadFailed
+        await refreshDbStatus()
+        await regulationIndex.refreshStats()
+      }
+
       regulationStore.finishSyncCompare(compareResult)
 
       console.warn(
-        `[RegulationQuery] 同步对比完成: 在线 ${compareResult.online_total}, 匹配 ${compareResult.matched}, 新增 ${compareResult.new_regulations.length}`
+        `[RegulationQuery] 同步完成: 在线 ${compareResult.online_total}, 匹配 ${compareResult.matched}, 新增 ${compareResult.new_regulations.length}, 下载 ${compareResult.downloaded ?? 0}`
       )
 
       return compareResult
@@ -666,7 +744,7 @@ export function useRegulationQuery() {
    */
   async function ocrPendingFiles(
     batchSize: number = 5,
-    onProgress?: (current: string, done: number, total: number) => void,
+    onProgress?: (current: string, done: number, total: number) => void
   ): Promise<{ success: number; failed: number; total: number }> {
     try {
       error.value = null
@@ -675,16 +753,26 @@ export function useRegulationQuery() {
       let progressCleanup: (() => void) | null = null
       if (onProgress) {
         const { listen } = await import('@tauri-apps/api/event')
+        let lastDone = 0
+        const INVALID_VALIDITY_LABELS = ['失效', '废止', '历史版本']
         const unlisten = await listen<{
           current: string
-          ocr_success: number
-          ocr_failed: number
-          skipped: number
+          validity?: string
+          ocr_success?: number
+          ocr_failed?: number
+          skipped?: number
           current_page?: number
           total_pages?: number
-        }>('regulation:ocr-progress', (event) => {
-          const { current, ocr_success, ocr_failed } = event.payload
-          onProgress(current, ocr_success + ocr_failed, batchSize)
+        }>('regulation:ocr-progress', event => {
+          const { current, validity, ocr_success, ocr_failed } = event.payload
+          if (typeof ocr_success === 'number' && typeof ocr_failed === 'number') {
+            lastDone = ocr_success + ocr_failed
+          }
+          const displayCurrent =
+            current && validity && INVALID_VALIDITY_LABELS.includes(validity)
+              ? `[${validity}] ${current}`
+              : current
+          onProgress(displayCurrent, lastDone, batchSize)
         })
         progressCleanup = unlisten
       }
@@ -704,7 +792,7 @@ export function useRegulationQuery() {
       await regulationIndex.refreshStats()
 
       console.warn(
-        `[RegulationQuery] OCR 处理完成 (Rust 原生): 成功 ${result.ocr_success}, 失败 ${result.ocr_failed}`,
+        `[RegulationQuery] OCR 处理完成 (Rust 原生): 成功 ${result.ocr_success}, 失败 ${result.ocr_failed}`
       )
       return {
         success: result.ocr_success,
@@ -798,6 +886,7 @@ export function useRegulationQuery() {
     searchLocal,
     searchHybrid,
     initLocalIndex,
+    refreshLocalIndexStats,
     download,
     downloadBatch,
     downloadBatchNative,

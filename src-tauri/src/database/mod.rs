@@ -14,12 +14,12 @@ pub mod settings;
 
 // 重新导出常用类型
 pub use regulation::{
-    RegulationFile, SyncStatus, OcrProgress,
-    init_regulation_schema, file_exists_by_hash, url_exists, get_file_by_url,
-    insert_file, update_ocr_status, mark_indexed, get_pending_ocr_files,
-    get_sync_status, get_unindexed_files, update_page_count, reset_failed_ocr_files,
+    delete_files_by_ids, file_exists_by_hash, get_file_by_url, get_pending_ocr_files,
+    get_sync_status, get_unindexed_files, init_regulation_schema, insert_file, mark_indexed,
+    reset_failed_ocr_files, update_ocr_status, update_page_count, url_exists, OcrProgress,
+    RegulationFile, SyncStatus,
 };
 pub use settings::{
-    AppConfig, get_cached_config, get_config_path, init_config, load_config,
-    save_config, update_cached_config,
+    get_cached_config, get_config_path, init_config, load_config, save_config,
+    update_cached_config, AppConfig,
 };
