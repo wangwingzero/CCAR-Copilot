@@ -38,9 +38,9 @@ use image::DynamicImage;
 use ndarray::Array3;
 use rayon::prelude::*;
 
-use super::models::{CHAR_DICT, REC_MODEL_IR_XML, REC_MODEL_IR_BIN};
+use super::models::{CHAR_DICT, REC_MODEL_IR_BIN, REC_MODEL_IR_XML};
 use super::openvino_engine::InferenceSession;
-use super::preprocessor::{preprocess_for_recognition_u8, preprocess_for_recognition_bucketed};
+use super::preprocessor::{preprocess_for_recognition_bucketed, preprocess_for_recognition_u8};
 use super::types::{OcrError, TextBox, TextRegion};
 
 /// 文本识别器
@@ -82,11 +82,7 @@ impl TextRecognizer {
         let session = Self::load_model()?;
         let char_dict = Self::load_char_dict();
 
-        Ok(Self {
-            session,
-            char_dict,
-            input_height,
-        })
+        Ok(Self { session, char_dict, input_height })
     }
 
     /// 预热所有宽度档位
@@ -106,46 +102,43 @@ impl TextRecognizer {
     /// - `Err(OcrError)`: 预热失败
     pub fn warmup(&self) -> Result<(), OcrError> {
         use super::preprocessor::RECOGNITION_WIDTH_BUCKETS;
-        
+
         let warmup_start = std::time::Instant::now();
         let height = self.input_height as usize;
         let channels = 3;
         const WARMUP_ITERATIONS: usize = 3;
-        
+
         tracing::info!(
             "🔥 开始预热识别模型: {} 个档位, 每档 {} 次",
             RECOGNITION_WIDTH_BUCKETS.len(),
             WARMUP_ITERATIONS
         );
-        
+
         // 按从大到小顺序预热（大尺寸先分配内存，小尺寸可复用）
         let mut buckets_desc: Vec<usize> = RECOGNITION_WIDTH_BUCKETS.to_vec();
         buckets_desc.sort_by(|a, b| b.cmp(a)); // 降序排列
-        
+
         for &width in &buckets_desc {
             let bucket_start = std::time::Instant::now();
-            
+
             // 创建哑数据（全零）
             let dummy_data = vec![0u8; height * width * channels];
-            
+
             // 预热多次
             for i in 0..WARMUP_ITERATIONS {
                 self.session.infer_recognition_u8(&dummy_data, height, width)?;
                 tracing::trace!("预热档位 {} 第 {} 次完成", width, i + 1);
             }
-            
+
             tracing::debug!(
                 "✅ 档位 {} 预热完成，耗时 {:.0}ms",
                 width,
                 bucket_start.elapsed().as_millis()
             );
         }
-        
-        tracing::info!(
-            "🔥 识别模型预热完成，总耗时 {:.0}ms",
-            warmup_start.elapsed().as_millis()
-        );
-        
+
+        tracing::info!("🔥 识别模型预热完成，总耗时 {:.0}ms", warmup_start.elapsed().as_millis());
+
         Ok(())
     }
 
@@ -154,11 +147,8 @@ impl TextRecognizer {
         tracing::info!("Loading PP-OCRv4 recognition model (IR format) with OpenVINO...");
 
         // 使用 OpenVINO 加载 IR 模型（预处理已注入）
-        let session = InferenceSession::from_ir_bytes(
-            REC_MODEL_IR_XML,
-            REC_MODEL_IR_BIN,
-            "recognition"
-        )?;
+        let session =
+            InferenceSession::from_ir_bytes(REC_MODEL_IR_XML, REC_MODEL_IR_BIN, "recognition")?;
 
         tracing::info!("PP-OCRv4 recognition model (IR) loaded successfully");
         Ok(session)
@@ -191,8 +181,11 @@ impl TextRecognizer {
             dict.push("".to_string()); // 空字符串作为占位符
         }
 
-        tracing::info!("Loaded {} characters in dictionary (expected {})",
-            dict.len(), EXPECTED_VOCAB_SIZE);
+        tracing::info!(
+            "Loaded {} characters in dictionary (expected {})",
+            dict.len(),
+            EXPECTED_VOCAB_SIZE
+        );
         dict
     }
 
@@ -209,22 +202,22 @@ impl TextRecognizer {
     pub fn recognize_single(&self, image: &DynamicImage) -> Result<(String, f32), OcrError> {
         // 预处理（u8 NHWC BGR 格式）
         let (data, height, width) = preprocess_for_recognition_u8(image, self.input_height)?;
-        
+
         // 使用 OpenVINO 推理（u8 输入）
         let output = self.session.infer_recognition_u8(&data, height, width)?;
-        
+
         // CTC 解码
         let (text, confidence) = self.ctc_decode(&output);
-        
+
         Ok((text, confidence))
     }
 
     /// 批量识别文本区域
     ///
     /// 使用 **分桶策略 + 并行预处理 + 批量推理** 策略，最大化吞吐量。
-    /// 
+    ///
     /// # 性能优化策略
-    /// 
+    ///
     /// 1. **分桶策略 (Bucketing)**：将宽度归一化到 160/320/640/1280，避免 GPU Shader 重编译
     /// 2. **并行预处理 (rayon)**：裁剪、缩放、Padding 等 CPU 密集型操作
     /// 3. **按桶分组推理**：同一桶内的数据宽度相同，批量推理效率最高
@@ -252,7 +245,10 @@ impl TextRecognizer {
         }
 
         let start = std::time::Instant::now();
-        tracing::debug!("开始批量识别 {} 个文本区域（分桶策略 + 并行预处理 + 批量推理）", boxes.len());
+        tracing::debug!(
+            "开始批量识别 {} 个文本区域（分桶策略 + 并行预处理 + 批量推理）",
+            boxes.len()
+        );
 
         // ========================================
         // 阶段 1: 并行预处理 + 分桶（rayon）
@@ -270,9 +266,14 @@ impl TextRecognizer {
                     Ok(cropped) => {
                         // 预处理（缩放 + 分桶 + Padding，u8 NHWC BGR 格式）
                         match preprocess_for_recognition_bucketed(&cropped, self.input_height) {
-                            Ok((data, height, bucket_width, original_width)) => {
-                                Some((idx, bbox.clone(), data, height, bucket_width, original_width))
-                            }
+                            Ok((data, height, bucket_width, original_width)) => Some((
+                                idx,
+                                bbox.clone(),
+                                data,
+                                height,
+                                bucket_width,
+                                original_width,
+                            )),
                             Err(e) => {
                                 tracing::warn!("预处理区域 {} 失败: {}", idx, e);
                                 None
@@ -290,7 +291,8 @@ impl TextRecognizer {
         let preprocess_elapsed = preprocess_start.elapsed();
 
         // 统计各桶的数量
-        let mut bucket_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut bucket_counts: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
         for (_, _, _, _, bucket_width, _) in &preprocessed {
             *bucket_counts.entry(*bucket_width).or_default() += 1;
         }
@@ -319,33 +321,35 @@ impl TextRecognizer {
 
         // 存储所有推理结果: (原始索引, bbox, output, 原始宽度)
         let mut all_results: Vec<(usize, TextBox, ndarray::Array3<f32>, usize)> = Vec::new();
-        
+
         // 按桶分别进行批量推理
         for (bucket_width, items) in bucket_groups {
             let batch_size = items.len();
             tracing::debug!("推理桶 {} ({}个样本)", bucket_width, batch_size);
-            
+
             // 提取数据
             let indices: Vec<usize> = items.iter().map(|(idx, _, _, _, _, _)| *idx).collect();
-            let boxes_in_bucket: Vec<TextBox> = items.iter().map(|(_, bbox, _, _, _, _)| bbox.clone()).collect();
+            let boxes_in_bucket: Vec<TextBox> =
+                items.iter().map(|(_, bbox, _, _, _, _)| bbox.clone()).collect();
             let original_widths: Vec<usize> = items.iter().map(|(_, _, _, _, _, ow)| *ow).collect();
             let inputs: Vec<(Vec<u8>, usize, usize)> = items
                 .into_iter()
                 .map(|(_, _, data, height, bucket_width, _)| (data, height, bucket_width))
                 .collect();
-            
+
             // 执行批量推理（同一桶内宽度相同，无需额外 padding）
             let outputs = self.session.infer_recognition_batch_u8(&inputs, bucket_width)?;
-            
+
             // 收集结果
-            for ((idx, bbox), (output, original_width)) in indices.into_iter()
+            for ((idx, bbox), (output, original_width)) in indices
+                .into_iter()
                 .zip(boxes_in_bucket.into_iter())
                 .zip(outputs.into_iter().zip(original_widths.into_iter()))
             {
                 all_results.push((idx, bbox, output, original_width));
             }
         }
-        
+
         let infer_elapsed = infer_start.elapsed();
         tracing::debug!(
             "批量推理完成: {} 个输出, 耗时 {:.0}ms",
@@ -357,10 +361,10 @@ impl TextRecognizer {
         // 阶段 3: CTC 解码（考虑原始宽度截断）
         // ========================================
         let decode_start = std::time::Instant::now();
-        
+
         // 按原始索引排序（确保后续处理顺序正确）
         all_results.sort_by_key(|(idx, _, _, _)| *idx);
-        
+
         // 并行 CTC 解码（保留索引以便后续排序）
         let char_dict = &self.char_dict;
         let mut decoded_regions: Vec<(usize, TextRegion)> = all_results
@@ -370,18 +374,19 @@ impl TextRecognizer {
                 // 根据原始宽度计算有效的时间步数
                 // PP-OCRv4 识别模型的时间步 = 宽度 / 4（因为 CNN 下采样 4 倍）
                 let valid_timesteps = (*original_width).div_ceil(4); // 向上取整
-                let (text, confidence) = Self::ctc_decode_with_length(output, char_dict, valid_timesteps);
+                let (text, confidence) =
+                    Self::ctc_decode_with_length(output, char_dict, valid_timesteps);
                 (sorted_idx, TextRegion::new(bbox.clone(), text, confidence))
             })
             .collect();
-        
+
         // 按排序后的索引重新排序（恢复阅读顺序）
         // 因为 par_iter() 不保证输出顺序
         decoded_regions.sort_by_key(|(idx, _)| *idx);
         let regions: Vec<TextRegion> = decoded_regions.into_iter().map(|(_, r)| r).collect();
 
         let decode_elapsed = decode_start.elapsed();
-        
+
         tracing::info!(
             "批量识别完成: {} 个区域, 总耗时 {:.0}ms (预处理 {:.0}ms + 批量推理 {:.0}ms + 解码 {:.0}ms)",
             regions.len(),
@@ -407,10 +412,14 @@ impl TextRecognizer {
     /// # 返回
     ///
     /// (解码的文本, 平均置信度)
-    fn ctc_decode_with_length(output: &Array3<f32>, char_dict: &[String], valid_timesteps: usize) -> (String, f32) {
+    fn ctc_decode_with_length(
+        output: &Array3<f32>,
+        char_dict: &[String],
+        valid_timesteps: usize,
+    ) -> (String, f32) {
         let total_timesteps = output.shape()[1];
         let vocab_size = output.shape()[2];
-        
+
         // 只解码有效的时间步，避免 Padding 区域产生乱码
         let timesteps = valid_timesteps.min(total_timesteps);
 
@@ -530,7 +539,7 @@ impl TextRecognizer {
             // PP-OCRv4 模型输出可能是：
             // 1. 原始 logits（需要 softmax）
             // 2. 已经是 softmax 概率（直接使用）
-            // 
+            //
             // 判断方法：检查输出值的范围
             // - 如果 max_val > 1.0 或有负值，说明是 logits
             // - 如果 max_val <= 1.0 且所有值 >= 0，可能是概率
@@ -572,8 +581,6 @@ impl TextRecognizer {
         (text, avg_confidence)
     }
 
-
-
     /// 获取字符字典大小
     pub fn vocab_size(&self) -> usize {
         self.char_dict.len()
@@ -601,17 +608,17 @@ mod tests {
     #[test]
     fn test_load_char_dict() {
         let dict = TextRecognizer::load_char_dict();
-        
+
         // 第一个应该是空白标记
         assert_eq!(dict[0], "");
-        
+
         // 应该包含基本字符
         assert!(dict.len() > 1000, "字典应该包含超过 1000 个字符");
-        
+
         // 应该包含数字
         assert!(dict.contains(&"0".to_string()));
         assert!(dict.contains(&"9".to_string()));
-        
+
         // 应该包含字母
         assert!(dict.contains(&"a".to_string()));
         assert!(dict.contains(&"A".to_string()));
@@ -626,65 +633,62 @@ mod tests {
         // 创建一个简单的模拟输出
         // 假设字典: [blank, a, b, c, ...]
         // 输出序列: [a, a, blank, b, b, b] -> "ab"
-        
+
         let dict = vec![
-            "".to_string(),  // blank
+            "".to_string(), // blank
             "a".to_string(),
             "b".to_string(),
             "c".to_string(),
         ];
-        
+
         // 创建模拟的 recognizer（不加载真实模型）
         // 这里我们直接测试解码逻辑
-        
+
         // 模拟输出: 6 个时间步，4 个字符
         let mut output = Array3::<f32>::zeros((1, 6, 4));
-        
+
         // 时间步 0, 1: 'a' (索引 1) 概率最高
         output[[0, 0, 1]] = 10.0;
         output[[0, 1, 1]] = 10.0;
-        
+
         // 时间步 2: blank (索引 0) 概率最高
         output[[0, 2, 0]] = 10.0;
-        
+
         // 时间步 3, 4, 5: 'b' (索引 2) 概率最高
         output[[0, 3, 2]] = 10.0;
         output[[0, 4, 2]] = 10.0;
         output[[0, 5, 2]] = 10.0;
-        
+
         // 手动执行 CTC 解码逻辑
         let (text, _) = ctc_decode_test(&output, &dict);
-        
+
         assert_eq!(text, "ab", "CTC 解码应该输出 'ab'");
     }
 
     #[test]
     fn test_ctc_decode_empty() {
         let dict = vec!["".to_string(), "a".to_string()];
-        
+
         // 所有时间步都是 blank
         let mut output = Array3::<f32>::zeros((1, 5, 2));
         for t in 0..5 {
             output[[0, t, 0]] = 10.0; // blank 概率最高
         }
-        
+
         let (text, _) = ctc_decode_test(&output, &dict);
         assert!(text.is_empty(), "全 blank 应该输出空字符串");
     }
 
     #[test]
     fn test_ctc_decode_repeated() {
-        let dict = vec![
-            "".to_string(),
-            "a".to_string(),
-        ];
-        
+        let dict = vec!["".to_string(), "a".to_string()];
+
         // 连续的 'a' 应该合并为一个
         let mut output = Array3::<f32>::zeros((1, 5, 2));
         for t in 0..5 {
             output[[0, t, 1]] = 10.0; // 'a' 概率最高
         }
-        
+
         let (text, _) = ctc_decode_test(&output, &dict);
         assert_eq!(text, "a", "连续相同字符应该合并");
     }
@@ -739,21 +743,21 @@ mod tests {
         output[[0, 0, 0]] = 1.0;
         output[[0, 0, 1]] = 2.0;
         output[[0, 0, 2]] = 3.0;
-        
+
         // 手动计算 softmax
         let max_val = 3.0f32;
         let sum_exp = (1.0 - max_val).exp() + (2.0 - max_val).exp() + (3.0 - max_val).exp();
         let expected_prob = (3.0 - max_val).exp() / sum_exp;
-        
+
         // 计算索引 2 的 softmax 概率
         let prob = softmax_test(&output, 0, 2);
-        
+
         assert!((prob - expected_prob).abs() < 0.001);
     }
 
     fn softmax_test(output: &Array3<f32>, timestep: usize, idx: usize) -> f32 {
         let vocab_size = output.shape()[2];
-        
+
         let mut max_val = f32::NEG_INFINITY;
         for v in 0..vocab_size {
             max_val = max_val.max(output[[0, timestep, v]]);
@@ -775,7 +779,7 @@ mod tests {
     fn test_recognizer_creation() {
         // 注意：此测试需要模型文件正确嵌入
         let result = TextRecognizer::new();
-        
+
         match result {
             Ok(recognizer) => {
                 println!("Recognizer created successfully");
@@ -798,12 +802,12 @@ mod tests {
     fn test_recognizer_warmup() {
         // 注意：此测试需要模型文件正确嵌入和 OpenVINO 环境
         let result = TextRecognizer::new();
-        
+
         match result {
             Ok(recognizer) => {
                 println!("开始预热测试...");
                 let start = std::time::Instant::now();
-                
+
                 match recognizer.warmup() {
                     Ok(()) => {
                         let elapsed = start.elapsed();

@@ -29,7 +29,7 @@
 
 use image::DynamicImage;
 
-use super::models::{DET_MODEL_IR_XML, DET_MODEL_IR_BIN};
+use super::models::{DET_MODEL_IR_BIN, DET_MODEL_IR_XML};
 use super::openvino_engine::InferenceSession;
 use super::postprocessor::DBPostProcessor;
 use super::preprocessor::preprocess_for_detection_u8;
@@ -76,10 +76,7 @@ impl TextDetector {
     /// - `postprocessor`: 自定义的 DB 后处理器
     pub fn with_postprocessor(postprocessor: DBPostProcessor) -> Result<Self, OcrError> {
         let session = Self::load_model()?;
-        Ok(Self {
-            session,
-            postprocessor,
-        })
+        Ok(Self { session, postprocessor })
     }
 
     /// 加载检测模型（IR 格式）
@@ -87,11 +84,8 @@ impl TextDetector {
         tracing::info!("Loading PP-OCRv4 detection model (IR format) with OpenVINO...");
 
         // 使用 OpenVINO 加载 IR 模型（预处理已注入）
-        let session = InferenceSession::from_ir_bytes(
-            DET_MODEL_IR_XML,
-            DET_MODEL_IR_BIN,
-            "detection"
-        )?;
+        let session =
+            InferenceSession::from_ir_bytes(DET_MODEL_IR_XML, DET_MODEL_IR_BIN, "detection")?;
 
         tracing::info!("PP-OCRv4 detection model (IR) loaded successfully");
         Ok(session)
@@ -155,7 +149,7 @@ mod tests {
         // 注意：此测试需要模型文件正确嵌入
         // 如果模型加载失败，测试会失败
         let result = TextDetector::new();
-        
+
         // 模型加载可能因环境问题失败，这里只验证不会 panic
         match result {
             Ok(_) => println!("Detector created successfully"),
@@ -165,12 +159,10 @@ mod tests {
 
     #[test]
     fn test_detector_with_custom_postprocessor() {
-        let postprocessor = DBPostProcessor::default()
-            .with_threshold(0.5)
-            .with_box_threshold(0.7);
-        
+        let postprocessor = DBPostProcessor::default().with_threshold(0.5).with_box_threshold(0.7);
+
         let result = TextDetector::with_postprocessor(postprocessor);
-        
+
         match result {
             Ok(_) => println!("Detector with custom postprocessor created successfully"),
             Err(e) => println!("Detector creation failed: {}", e),

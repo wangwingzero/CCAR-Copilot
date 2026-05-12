@@ -35,11 +35,11 @@ pub struct LayoutProcessor {
     /// 垂直重叠阈值（默认 0.5）
     /// 两个文本框的垂直重叠度超过此值时，视为同一行
     y_overlap_threshold: f64,
-    
+
     /// 空格宽度系数（默认 0.5）
     /// 空格宽度 = 字符高度 * 此系数
     space_width_ratio: f64,
-    
+
     /// 最大空格数（默认 20）
     /// 防止间距过大时插入过多空格
     max_spaces: usize,
@@ -47,11 +47,7 @@ pub struct LayoutProcessor {
 
 impl Default for LayoutProcessor {
     fn default() -> Self {
-        Self {
-            y_overlap_threshold: 0.5,
-            space_width_ratio: 0.5,
-            max_spaces: 20,
-        }
+        Self { y_overlap_threshold: 0.5, space_width_ratio: 0.5, max_spaces: 20 }
     }
 }
 
@@ -150,7 +146,9 @@ impl LayoutProcessor {
         }
 
         // 按 Y 坐标排序行
-        lines.sort_by(|a, b| a.y_center.partial_cmp(&b.y_center).unwrap_or(std::cmp::Ordering::Equal));
+        lines.sort_by(|a, b| {
+            a.y_center.partial_cmp(&b.y_center).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // 行内按 X 坐标排序
         for line in &mut lines {
@@ -177,7 +175,7 @@ impl LayoutProcessor {
         let box_center = (y_min + y_max) / 2.0;
         let center_diff = (box_center - line_y_center).abs();
         let threshold = (height.min(line_avg_height)) * self.y_overlap_threshold;
-        
+
         center_diff < threshold
     }
 
@@ -187,7 +185,8 @@ impl LayoutProcessor {
             return (0.0, 0.0, 0.0, 0.0);
         }
 
-        let y_coords: Vec<f64> = b.box_coords.iter().map(|p| p.get(1).copied().unwrap_or(0.0)).collect();
+        let y_coords: Vec<f64> =
+            b.box_coords.iter().map(|p| p.get(1).copied().unwrap_or(0.0)).collect();
         let y_min = y_coords.iter().cloned().fold(f64::INFINITY, f64::min);
         let y_max = y_coords.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let y_center = (y_min + y_max) / 2.0;
@@ -198,10 +197,7 @@ impl LayoutProcessor {
 
     /// 获取文本框的 X 最小坐标
     fn get_x_min(&self, b: &OcrBox) -> f64 {
-        b.box_coords
-            .iter()
-            .map(|p| p.first().copied().unwrap_or(0.0))
-            .fold(f64::INFINITY, f64::min)
+        b.box_coords.iter().map(|p| p.first().copied().unwrap_or(0.0)).fold(f64::INFINITY, f64::min)
     }
 
     /// 获取文本框的 X 最大坐标
@@ -216,9 +212,7 @@ impl LayoutProcessor {
     fn generate_text(&self, lines: &[TextLine], global_char_width: Option<f64>) -> String {
         let mut result = String::new();
         let char_width = global_char_width.filter(|w| *w > 0.0);
-        let global_origin_x = char_width
-            .map(|_| self.get_global_min_x(lines))
-            .unwrap_or(0.0);
+        let global_origin_x = char_width.map(|_| self.get_global_min_x(lines)).unwrap_or(0.0);
 
         // 智能段落检测：计算典型行间距和左边距
         let typical_line_gap = self.calculate_typical_line_gap(lines);
@@ -287,7 +281,7 @@ impl LayoutProcessor {
 
         // 空格宽度 = 字符高度 * 空格宽度系数
         let space_width = char_height * self.space_width_ratio;
-        
+
         self.calculate_space_count_with_width(gap, space_width)
     }
 
@@ -341,7 +335,11 @@ impl LayoutProcessor {
                 }
             }
         }
-        if min_x.is_finite() { min_x } else { 0.0 }
+        if min_x.is_finite() {
+            min_x
+        } else {
+            0.0
+        }
     }
 
     /// 将 x 坐标映射为列索引（等宽字符网格）
@@ -350,7 +348,11 @@ impl LayoutProcessor {
             return 0;
         }
         let col = ((x - origin_x) / char_width).round() as isize;
-        if col < 0 { 0 } else { col as usize }
+        if col < 0 {
+            0
+        } else {
+            col as usize
+        }
     }
 
     /// 计算典型行间距（相邻行 Y 中心的间距中位数）
@@ -456,10 +458,10 @@ mod tests {
             text: text.to_string(),
             confidence: 0.95,
             box_coords: vec![
-                vec![x, y],           // 左上
-                vec![x + w, y],       // 右上
-                vec![x + w, y + h],   // 右下
-                vec![x, y + h],       // 左下
+                vec![x, y],         // 左上
+                vec![x + w, y],     // 右上
+                vec![x + w, y + h], // 右下
+                vec![x, y + h],     // 左下
             ],
         }
     }
@@ -524,10 +526,8 @@ mod tests {
     fn test_max_spaces_limit() {
         let processor = LayoutProcessor::new().with_max_spaces(5);
         // 两个文本框在同一行，间距非常大
-        let boxes = vec![
-            create_box("A", 0.0, 0.0, 20.0, 30.0),
-            create_box("B", 500.0, 0.0, 20.0, 30.0),
-        ];
+        let boxes =
+            vec![create_box("A", 0.0, 0.0, 20.0, 30.0), create_box("B", 500.0, 0.0, 20.0, 30.0)];
         let result = processor.process(&boxes);
         let space_count = result.matches(' ').count();
         assert!(space_count <= 5, "Expected at most 5 spaces, got {}", space_count);
@@ -578,7 +578,11 @@ mod tests {
             create_box("第二段开始", 60.0, 40.0, 200.0, 30.0),
         ];
         let result = processor.process(&boxes);
-        assert!(result.contains("\n\n"), "Should detect indent as paragraph break, got: {}", result);
+        assert!(
+            result.contains("\n\n"),
+            "Should detect indent as paragraph break, got: {}",
+            result
+        );
     }
 
     #[test]
@@ -591,7 +595,11 @@ mod tests {
             create_box("第三行", 0.0, 80.0, 200.0, 30.0),
         ];
         let result = processor.process(&boxes);
-        assert!(!result.contains("\n\n"), "Should not have paragraph break with normal spacing, got: {}", result);
+        assert!(
+            !result.contains("\n\n"),
+            "Should not have paragraph break with normal spacing, got: {}",
+            result
+        );
     }
 
     #[test]

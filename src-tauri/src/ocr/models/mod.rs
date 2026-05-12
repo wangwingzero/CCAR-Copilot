@@ -132,11 +132,7 @@ mod tests {
 
         // 检查 XML 文件以 <?xml 开头
         let xml_header = std::str::from_utf8(&DET_MODEL_IR_XML[..5]).unwrap_or("");
-        assert!(
-            xml_header == "<?xml",
-            "检测模型 XML 应以 <?xml 开头，实际: {:?}",
-            xml_header
-        );
+        assert!(xml_header == "<?xml", "检测模型 XML 应以 <?xml 开头，实际: {:?}", xml_header);
 
         // PP-OCRv4 检测模型 IR 格式：
         // - preprocessed (FP16 压缩): ~1.2MB
@@ -157,11 +153,7 @@ mod tests {
 
         // 检查 XML 文件以 <?xml 开头
         let xml_header = std::str::from_utf8(&REC_MODEL_IR_XML[..5]).unwrap_or("");
-        assert!(
-            xml_header == "<?xml",
-            "识别模型 XML 应以 <?xml 开头，实际: {:?}",
-            xml_header
-        );
+        assert!(xml_header == "<?xml", "识别模型 XML 应以 <?xml 开头，实际: {:?}", xml_header);
 
         // PP-OCRv4 识别模型 IR 格式：
         // - preprocessed (FP16 压缩): ~2.7MB
@@ -181,40 +173,21 @@ mod tests {
 
         // 检查字典行数（PP-OCRv4 字典通常有 6000+ 个字符）
         let line_count = CHAR_DICT.lines().count();
-        assert!(
-            line_count > 1000,
-            "字符字典应包含超过 1000 个字符，实际: {} 行",
-            line_count
-        );
+        assert!(line_count > 1000, "字符字典应包含超过 1000 个字符，实际: {} 行", line_count);
 
         // 检查是否包含基本字符
         let chars: Vec<&str> = CHAR_DICT.lines().collect();
 
         // 检查是否包含数字
-        assert!(
-            chars.contains(&"0"),
-            "字符字典应包含数字 '0'"
-        );
-        assert!(
-            chars.contains(&"9"),
-            "字符字典应包含数字 '9'"
-        );
+        assert!(chars.contains(&"0"), "字符字典应包含数字 '0'");
+        assert!(chars.contains(&"9"), "字符字典应包含数字 '9'");
 
         // 检查是否包含英文字母
-        assert!(
-            chars.contains(&"a"),
-            "字符字典应包含小写字母 'a'"
-        );
-        assert!(
-            chars.contains(&"A"),
-            "字符字典应包含大写字母 'A'"
-        );
+        assert!(chars.contains(&"a"), "字符字典应包含小写字母 'a'");
+        assert!(chars.contains(&"A"), "字符字典应包含大写字母 'A'");
 
         // 检查是否包含中文字符（常用字）
-        assert!(
-            chars.contains(&"的"),
-            "字符字典应包含常用中文字 '的'"
-        );
+        assert!(chars.contains(&"的"), "字符字典应包含常用中文字 '的'");
     }
 
     /// 验证字符字典格式正确
@@ -246,7 +219,9 @@ mod tests {
         );
 
         // 打印字典统计信息
-        println!("字典统计: 总行数={}, 单字符={}, 多字符={}",
-            total_lines, single_char_count, multi_char_count);
+        println!(
+            "字典统计: 总行数={}, 单字符={}, 多字符={}",
+            total_lines, single_char_count, multi_char_count
+        );
     }
 }

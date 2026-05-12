@@ -63,11 +63,7 @@ impl OcrResult {
     ///
     /// - `elapse`: 处理耗时（秒）
     pub fn empty(elapse: f64) -> Self {
-        Self {
-            text: String::new(),
-            boxes: Vec::new(),
-            elapse,
-        }
+        Self { text: String::new(), boxes: Vec::new(), elapse }
     }
 
     /// 从文本区域列表创建结果
@@ -79,11 +75,7 @@ impl OcrResult {
     /// - `boxes`: 文本区域列表
     /// - `elapse`: 处理耗时（秒）
     pub fn from_boxes(boxes: Vec<OcrBox>, elapse: f64) -> Self {
-        let text = boxes
-            .iter()
-            .map(|b| b.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = boxes.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n");
 
         Self { text, boxes, elapse }
     }
@@ -126,11 +118,7 @@ impl OcrBox {
     /// - `confidence`: 置信度 (0.0 - 1.0)
     /// - `box_coords`: 边界框坐标
     pub fn new(text: String, confidence: f64, box_coords: Vec<Vec<f64>>) -> Self {
-        Self {
-            text,
-            confidence,
-            box_coords,
-        }
+        Self { text, confidence, box_coords }
     }
 
     /// 从内部 TextRegion 转换
@@ -181,10 +169,7 @@ impl TextBox {
     /// 将内部的 [[f32; 2]; 4] 格式转换为 Vec<Vec<f64>> 格式，
     /// 用于与前端接口兼容。
     pub fn to_coords(&self) -> Vec<Vec<f64>> {
-        self.points
-            .iter()
-            .map(|p| vec![p[0] as f64, p[1] as f64])
-            .collect()
+        self.points.iter().map(|p| vec![p[0] as f64, p[1] as f64]).collect()
     }
 
     /// 获取边界矩形
@@ -282,11 +267,7 @@ impl TextRegion {
     /// - `text`: 识别文本
     /// - `confidence`: 识别置信度
     pub fn new(bbox: TextBox, text: String, confidence: f32) -> Self {
-        Self {
-            bbox,
-            text,
-            confidence,
-        }
+        Self { bbox, text, confidence }
     }
 
     /// 转换为 OcrBox
@@ -373,11 +354,7 @@ impl From<Vec<TextRegion>> for OcrResult {
     /// 自动计算总文本和转换所有区域。
     fn from(regions: Vec<TextRegion>) -> Self {
         let boxes: Vec<OcrBox> = regions.iter().map(|r| r.to_ocr_box()).collect();
-        let text = boxes
-            .iter()
-            .map(|b| b.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = boxes.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n");
 
         Self {
             text,
@@ -427,12 +404,7 @@ mod tests {
             boxes: vec![OcrBox::new(
                 "测试".to_string(),
                 0.98,
-                vec![
-                    vec![0.0, 0.0],
-                    vec![100.0, 0.0],
-                    vec![100.0, 50.0],
-                    vec![0.0, 50.0],
-                ],
+                vec![vec![0.0, 0.0], vec![100.0, 0.0], vec![100.0, 50.0], vec![0.0, 50.0]],
             )],
             elapse: 0.123,
         };
@@ -451,12 +423,7 @@ mod tests {
 
     #[test]
     fn test_ocr_box_new() {
-        let box_coords = vec![
-            vec![0.0, 0.0],
-            vec![100.0, 0.0],
-            vec![100.0, 50.0],
-            vec![0.0, 50.0],
-        ];
+        let box_coords = vec![vec![0.0, 0.0], vec![100.0, 0.0], vec![100.0, 50.0], vec![0.0, 50.0]];
         let ocr_box = OcrBox::new("Hello".to_string(), 0.95, box_coords.clone());
 
         assert_eq!(ocr_box.text, "Hello");
@@ -466,15 +433,7 @@ mod tests {
 
     #[test]
     fn test_ocr_box_from_text_region() {
-        let text_box = TextBox::new(
-            [
-                [0.0, 0.0],
-                [100.0, 0.0],
-                [100.0, 50.0],
-                [0.0, 50.0],
-            ],
-            0.9,
-        );
+        let text_box = TextBox::new([[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]], 0.9);
         let region = TextRegion::new(text_box, "测试".to_string(), 0.95);
         let ocr_box = OcrBox::from_text_region(&region);
 
@@ -490,12 +449,7 @@ mod tests {
 
     #[test]
     fn test_text_box_new() {
-        let points = [
-            [0.0, 0.0],
-            [100.0, 0.0],
-            [100.0, 50.0],
-            [0.0, 50.0],
-        ];
+        let points = [[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
         let text_box = TextBox::new(points, 0.9);
 
         assert_eq!(text_box.points, points);
@@ -504,15 +458,7 @@ mod tests {
 
     #[test]
     fn test_text_box_to_coords() {
-        let text_box = TextBox::new(
-            [
-                [0.0, 0.0],
-                [100.0, 0.0],
-                [100.0, 50.0],
-                [0.0, 50.0],
-            ],
-            0.9,
-        );
+        let text_box = TextBox::new([[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]], 0.9);
         let coords = text_box.to_coords();
 
         assert_eq!(coords.len(), 4);
@@ -524,15 +470,8 @@ mod tests {
 
     #[test]
     fn test_text_box_bounding_rect() {
-        let text_box = TextBox::new(
-            [
-                [10.0, 20.0],
-                [110.0, 20.0],
-                [110.0, 70.0],
-                [10.0, 70.0],
-            ],
-            0.9,
-        );
+        let text_box =
+            TextBox::new([[10.0, 20.0], [110.0, 20.0], [110.0, 70.0], [10.0, 70.0]], 0.9);
         let (x, y, w, h) = text_box.bounding_rect();
 
         assert!((x - 10.0).abs() < f32::EPSILON);
@@ -543,15 +482,7 @@ mod tests {
 
     #[test]
     fn test_text_box_center() {
-        let text_box = TextBox::new(
-            [
-                [0.0, 0.0],
-                [100.0, 0.0],
-                [100.0, 100.0],
-                [0.0, 100.0],
-            ],
-            0.9,
-        );
+        let text_box = TextBox::new([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]], 0.9);
         let (cx, cy) = text_box.center();
 
         assert!((cx - 50.0).abs() < f32::EPSILON);
@@ -560,15 +491,7 @@ mod tests {
 
     #[test]
     fn test_text_box_width_height() {
-        let text_box = TextBox::new(
-            [
-                [0.0, 0.0],
-                [100.0, 0.0],
-                [100.0, 50.0],
-                [0.0, 50.0],
-            ],
-            0.9,
-        );
+        let text_box = TextBox::new([[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]], 0.9);
 
         assert!((text_box.width() - 100.0).abs() < f32::EPSILON);
         assert!((text_box.height() - 50.0).abs() < f32::EPSILON);
@@ -576,15 +499,8 @@ mod tests {
 
     #[test]
     fn test_text_box_scale() {
-        let mut text_box = TextBox::new(
-            [
-                [0.0, 0.0],
-                [100.0, 0.0],
-                [100.0, 50.0],
-                [0.0, 50.0],
-            ],
-            0.9,
-        );
+        let mut text_box =
+            TextBox::new([[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]], 0.9);
         text_box.scale(2.0, 3.0);
 
         assert!((text_box.points[1][0] - 200.0).abs() < f32::EPSILON);
@@ -593,15 +509,7 @@ mod tests {
 
     #[test]
     fn test_text_box_scaled() {
-        let text_box = TextBox::new(
-            [
-                [0.0, 0.0],
-                [100.0, 0.0],
-                [100.0, 50.0],
-                [0.0, 50.0],
-            ],
-            0.9,
-        );
+        let text_box = TextBox::new([[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]], 0.9);
         let scaled = text_box.scaled(0.5, 0.5);
 
         // 原始不变
@@ -617,15 +525,7 @@ mod tests {
 
     #[test]
     fn test_text_region_new() {
-        let text_box = TextBox::new(
-            [
-                [0.0, 0.0],
-                [100.0, 0.0],
-                [100.0, 50.0],
-                [0.0, 50.0],
-            ],
-            0.9,
-        );
+        let text_box = TextBox::new([[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]], 0.9);
         let region = TextRegion::new(text_box, "Hello".to_string(), 0.95);
 
         assert_eq!(region.text, "Hello");
@@ -634,15 +534,7 @@ mod tests {
 
     #[test]
     fn test_text_region_to_ocr_box() {
-        let text_box = TextBox::new(
-            [
-                [0.0, 0.0],
-                [100.0, 0.0],
-                [100.0, 50.0],
-                [0.0, 50.0],
-            ],
-            0.9,
-        );
+        let text_box = TextBox::new([[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]], 0.9);
         let region = TextRegion::new(text_box, "测试".to_string(), 0.95);
         let ocr_box = region.to_ocr_box();
 
@@ -700,18 +592,12 @@ mod tests {
     fn test_vec_text_region_to_ocr_result() {
         let regions = vec![
             TextRegion::new(
-                TextBox::new(
-                    [[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]],
-                    0.9,
-                ),
+                TextBox::new([[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]], 0.9),
                 "Hello".to_string(),
                 0.95,
             ),
             TextRegion::new(
-                TextBox::new(
-                    [[0.0, 60.0], [100.0, 60.0], [100.0, 110.0], [0.0, 110.0]],
-                    0.85,
-                ),
+                TextBox::new([[0.0, 60.0], [100.0, 60.0], [100.0, 110.0], [0.0, 110.0]], 0.85),
                 "World".to_string(),
                 0.90,
             ),

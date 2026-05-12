@@ -84,14 +84,14 @@ impl OcrEngine {
             let start = Instant::now();
 
             let engine = OcrEngine::new(OcrConfig::default())?;
-            
+
             // 预热模型（消除首帧卡顿）
             if MODEL_WARMED_UP.get().is_none() {
                 // 预热识别模型
                 if let Err(e) = engine.recognizer.warmup() {
                     tracing::warn!("识别模型预热失败（不影响正常使用）: {}", e);
                 }
-                
+
                 // 预热检测模型（检测占 OCR 总时间 73%，首次推理会慢 30-50%）
                 {
                     use image::{ImageBuffer, Rgba};
@@ -115,14 +115,11 @@ impl OcrEngine {
                         warmup_start.elapsed().as_secs_f64()
                     );
                 }
-                
+
                 let _ = MODEL_WARMED_UP.set(true);
             }
 
-            tracing::info!(
-                "OCR engine initialized in {:.2}s",
-                start.elapsed().as_secs_f64()
-            );
+            tracing::info!("OCR engine initialized in {:.2}s", start.elapsed().as_secs_f64());
 
             Ok(Arc::new(engine))
         })
@@ -144,11 +141,7 @@ impl OcrEngine {
         let detector = TextDetector::new()?;
         let recognizer = TextRecognizer::with_input_height(config.rec_input_height)?;
 
-        Ok(Self {
-            detector,
-            recognizer,
-            config,
-        })
+        Ok(Self { detector, recognizer, config })
     }
 
     /// 使用自定义配置创建引擎
@@ -192,28 +185,16 @@ impl OcrEngine {
 
         // 1. 加载图像
         let image = load_image(image_path)?;
-        tracing::debug!(
-            "Image loaded: {}x{}",
-            image.width(),
-            image.height()
-        );
+        tracing::debug!("Image loaded: {}x{}", image.width(), image.height());
 
         // 2. 执行 OCR
         let result = self.recognize_image(&image)?;
 
         let elapsed = start.elapsed().as_secs_f64();
-        tracing::info!(
-            "OCR completed: {} regions, {:.2}s",
-            result.boxes.len(),
-            elapsed
-        );
+        tracing::info!("OCR completed: {} regions, {:.2}s", result.boxes.len(), elapsed);
 
         // 更新耗时
-        Ok(OcrResult {
-            text: result.text,
-            boxes: result.boxes,
-            elapse: elapsed,
-        })
+        Ok(OcrResult { text: result.text, boxes: result.boxes, elapse: elapsed })
     }
 
     /// 高精度 OCR（用于后台处理，精度优先，不在乎速度）
@@ -238,11 +219,7 @@ impl OcrEngine {
             elapsed
         );
 
-        Ok(OcrResult {
-            text: result.text,
-            boxes: result.boxes,
-            elapse: elapsed,
-        })
+        Ok(OcrResult { text: result.text, boxes: result.boxes, elapse: elapsed })
     }
 
     /// 高精度图像识别（内部方法）
@@ -280,10 +257,8 @@ impl OcrEngine {
 
         // 使用更低的置信度阈值（0.3 而非默认的 0.5），召回更多文字
         let high_accuracy_threshold = 0.3f32;
-        let mut filtered_regions: Vec<TextRegion> = regions
-            .into_iter()
-            .filter(|r| r.confidence >= high_accuracy_threshold)
-            .collect();
+        let mut filtered_regions: Vec<TextRegion> =
+            regions.into_iter().filter(|r| r.confidence >= high_accuracy_threshold).collect();
 
         // 符号噪声过滤
         filtered_regions.retain(|r| !is_symbol_noise(&r.text));
@@ -296,20 +271,14 @@ impl OcrEngine {
         }
 
         // 转换为 OcrResult
-        let result_boxes: Vec<OcrBox> = filtered_regions
-            .iter()
-            .map(OcrBox::from_text_region)
-            .collect();
+        let result_boxes: Vec<OcrBox> =
+            filtered_regions.iter().map(OcrBox::from_text_region).collect();
 
         // 使用布局处理器生成文本
         let layout_processor = LayoutProcessor::new();
         let text = layout_processor.process(&result_boxes);
 
-        Ok(OcrResult {
-            text,
-            boxes: result_boxes,
-            elapse: start.elapsed().as_secs_f64(),
-        })
+        Ok(OcrResult { text, boxes: result_boxes, elapse: start.elapsed().as_secs_f64() })
     }
 
     /// 对图像执行 OCR
@@ -329,11 +298,7 @@ impl OcrEngine {
 
         // 0. 跳过超小图片（< 100x100 像素基本不含可读文字）
         if image.width() < 100 && image.height() < 100 {
-            tracing::debug!(
-                "跳过超小图片检测: {}x{} (< 100x100)",
-                image.width(),
-                image.height()
-            );
+            tracing::debug!("跳过超小图片检测: {}x{} (< 100x100)", image.width(), image.height());
             return Ok(OcrResult::empty(start.elapsed().as_secs_f64()));
         }
 
@@ -413,20 +378,13 @@ impl OcrEngine {
         );
 
         // 5. 转换为 OcrResult
-        let boxes: Vec<OcrBox> = filtered_regions
-            .iter()
-            .map(OcrBox::from_text_region)
-            .collect();
+        let boxes: Vec<OcrBox> = filtered_regions.iter().map(OcrBox::from_text_region).collect();
 
         // 6. 使用布局处理器生成保持原图排版的文本
         let layout_processor = LayoutProcessor::new();
         let text = layout_processor.process(&boxes);
 
-        Ok(OcrResult {
-            text,
-            boxes,
-            elapse: start.elapsed().as_secs_f64(),
-        })
+        Ok(OcrResult { text, boxes, elapse: start.elapsed().as_secs_f64() })
     }
 
     /// 仅执行文本检测
@@ -493,14 +451,14 @@ impl OcrEngine {
             // 中等图片：使用配置默认值
             self.config.det_input_size
         };
-        
+
         tracing::debug!(
             "自适应检测尺寸: 图片 {}x{} → det_size={}",
             image.width(),
             image.height(),
             det_size
         );
-        
+
         det_size
     }
 
@@ -553,10 +511,7 @@ impl OcrEngine {
         // 标记为已预热
         let _ = MODEL_WARMED_UP.set(true);
 
-        tracing::info!(
-            "OCR 模型预热完成，耗时 {:.2}s",
-            start.elapsed().as_secs_f64()
-        );
+        tracing::info!("OCR 模型预热完成，耗时 {:.2}s", start.elapsed().as_secs_f64());
 
         Ok(())
     }
@@ -621,7 +576,7 @@ mod tests {
     #[test]
     fn test_engine_with_default_config() {
         let result = OcrEngine::new(OcrConfig::default());
-        
+
         match result {
             Ok(engine) => {
                 assert!((engine.config().confidence_threshold - 0.3).abs() < f32::EPSILON);
@@ -640,16 +595,16 @@ mod tests {
     #[test]
     fn test_symbol_noise_filter_common_ui_symbols() {
         // 常见的 UI 图标误识别
-        assert!(is_symbol_noise(">"));    // 文件夹箭头
-        assert!(is_symbol_noise("{}"));   // JSON 文件图标
-        assert!(is_symbol_noise("!"));    // 警告图标
-        assert!(is_symbol_noise("[]"));   // 文件图标
-        assert!(is_symbol_noise("()"));   // 括号图标
-        assert!(is_symbol_noise("<>"));   // 角括号
-        assert!(is_symbol_noise("·"));    // 项目符号
-        assert!(is_symbol_noise("•"));    // 项目符号
-        assert!(is_symbol_noise("|"));    // 分隔线
-        assert!(is_symbol_noise(">>"));   // 双箭头
+        assert!(is_symbol_noise(">")); // 文件夹箭头
+        assert!(is_symbol_noise("{}")); // JSON 文件图标
+        assert!(is_symbol_noise("!")); // 警告图标
+        assert!(is_symbol_noise("[]")); // 文件图标
+        assert!(is_symbol_noise("()")); // 括号图标
+        assert!(is_symbol_noise("<>")); // 角括号
+        assert!(is_symbol_noise("·")); // 项目符号
+        assert!(is_symbol_noise("•")); // 项目符号
+        assert!(is_symbol_noise("|")); // 分隔线
+        assert!(is_symbol_noise(">>")); // 双箭头
     }
 
     #[test]
@@ -688,12 +643,10 @@ mod tests {
 
     #[test]
     fn test_engine_with_custom_config() {
-        let config = OcrConfig::default()
-            .with_confidence_threshold(0.7)
-            .with_max_image_size(4096);
-        
+        let config = OcrConfig::default().with_confidence_threshold(0.7).with_max_image_size(4096);
+
         let result = OcrEngine::with_config(config);
-        
+
         match result {
             Ok(engine) => {
                 assert!((engine.config().confidence_threshold - 0.7).abs() < f32::EPSILON);
@@ -712,7 +665,7 @@ mod tests {
     #[test]
     fn test_ocr_result_empty() {
         let result = OcrResult::empty(0.5);
-        
+
         assert!(result.text.is_empty());
         assert!(result.boxes.is_empty());
         assert!((result.elapse - 0.5).abs() < f64::EPSILON);
@@ -724,9 +677,9 @@ mod tests {
             OcrBox::new("Hello".to_string(), 0.95, vec![vec![0.0, 0.0]]),
             OcrBox::new("World".to_string(), 0.90, vec![vec![10.0, 10.0]]),
         ];
-        
+
         let result = OcrResult::from_boxes(boxes, 0.234);
-        
+
         assert_eq!(result.text, "Hello\nWorld");
         assert_eq!(result.boxes.len(), 2);
     }
@@ -740,7 +693,7 @@ mod tests {
         // 注意：此测试可能因模型加载失败而跳过
         let result1 = OcrEngine::instance();
         let result2 = OcrEngine::instance();
-        
+
         match (result1, result2) {
             (Ok(engine1), Ok(engine2)) => {
                 // 应该是同一个实例
@@ -801,13 +754,13 @@ mod property_tests {
         ) {
             // 创建测试图像
             let image = create_test_image(width, height);
-            
+
             // 尝试创建引擎并执行 OCR
             let engine_result = OcrEngine::new(OcrConfig::default());
-            
+
             if let Ok(engine) = engine_result {
                 let result = engine.recognize_image(&image);
-                
+
                 if let Ok(ocr_result) = result {
                     // 验证 elapse 非负
                     prop_assert!(
@@ -815,7 +768,7 @@ mod property_tests {
                         "elapse 应该非负，实际: {}",
                         ocr_result.elapse
                     );
-                    
+
                     // 验证每个 box 的结构
                     for bbox in &ocr_result.boxes {
                         // confidence 在 0.0-1.0 范围内
@@ -824,13 +777,13 @@ mod property_tests {
                             "confidence 应该在 0.0-1.0 范围内，实际: {}",
                             bbox.confidence
                         );
-                        
+
                         // box_coords 有 4 个点
                         prop_assert_eq!(
                             bbox.box_coords.len(), 4,
                             "box_coords 应该有 4 个点"
                         );
-                        
+
                         // 每个点有 2 个坐标
                         for point in &bbox.box_coords {
                             prop_assert_eq!(
@@ -862,10 +815,10 @@ mod property_tests {
             threshold in 0.3f32..0.9,
         ) {
             let config = OcrConfig::default().with_confidence_threshold(threshold);
-            
+
             if let Ok(engine) = OcrEngine::with_config(config) {
                 let image = create_test_image(200, 200);
-                
+
                 if let Ok(result) = engine.recognize_image(&image) {
                     for bbox in &result.boxes {
                         prop_assert!(
@@ -907,16 +860,16 @@ mod property_tests {
                 Rgba([128, 128, 128, 255])
             });
             let image = DynamicImage::ImageRgba8(img);
-            
+
             if let Ok(engine) = OcrEngine::new(OcrConfig::default()) {
                 let result = engine.recognize_image(&image);
-                
+
                 // 不应该返回错误
                 prop_assert!(
                     result.is_ok(),
                     "空图像不应该导致错误"
                 );
-                
+
                 if let Ok(ocr_result) = result {
                     // elapse 应该是正值
                     prop_assert!(
@@ -928,7 +881,6 @@ mod property_tests {
         }
     }
 }
-
 
 // ============================================
 // 集成测试

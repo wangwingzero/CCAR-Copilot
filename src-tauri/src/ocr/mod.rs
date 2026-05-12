@@ -83,7 +83,7 @@ pub use config::OcrConfig;
 pub use detector::TextDetector;
 pub use engine::OcrEngine;
 pub use layout::LayoutProcessor;
-pub use openvino_engine::{InferenceSession, get_openvino_info};
+pub use openvino_engine::{get_openvino_info, InferenceSession};
 pub use postprocessor::DBPostProcessor;
 pub use preprocessor::{
     crop_text_region, load_image, preprocess_for_detection, preprocess_for_recognition,

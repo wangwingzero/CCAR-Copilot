@@ -96,7 +96,7 @@ impl Default for OcrConfig {
         Self {
             confidence_threshold: 0.3,
             max_image_size: 2048,
-            det_input_size: 512,  // 从 640 进一步降低到 512，检测速度再提升 30-40%
+            det_input_size: 512, // 从 640 进一步降低到 512，检测速度再提升 30-40%
             rec_input_height: 48,
         }
     }
@@ -127,12 +127,7 @@ impl OcrConfig {
         det_input_size: u32,
         rec_input_height: u32,
     ) -> Self {
-        Self {
-            confidence_threshold,
-            max_image_size,
-            det_input_size,
-            rec_input_height,
-        }
+        Self { confidence_threshold, max_image_size, det_input_size, rec_input_height }
     }
 
     /// 设置置信度阈值（Builder 模式）
@@ -343,7 +338,7 @@ impl OcrConfig {
     /// ```
     pub fn screenshot_optimized() -> Self {
         Self {
-            confidence_threshold: 0.3,  // 宁可多识别，不要漏检
+            confidence_threshold: 0.3, // 宁可多识别，不要漏检
             max_image_size: 1920,
             det_input_size: 512,
             rec_input_height: 48,
@@ -369,7 +364,7 @@ mod tests {
 
         assert!((config.confidence_threshold - 0.3).abs() < f32::EPSILON);
         assert_eq!(config.max_image_size, 2048);
-        assert_eq!(config.det_input_size, 512);  // 从 960→640→512 以提升速度
+        assert_eq!(config.det_input_size, 512); // 从 960→640→512 以提升速度
         assert_eq!(config.rec_input_height, 48);
     }
 

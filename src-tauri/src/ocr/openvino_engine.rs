@@ -34,9 +34,11 @@
 
 use crossbeam::queue::ArrayQueue;
 use ndarray::{Array3, Array4};
-use openvino::{Core, CompiledModel, InferRequest, Tensor, ElementType, Shape, DeviceType, RwPropertyKey};
-use std::sync::{Arc, Mutex};
+use openvino::{
+    CompiledModel, Core, DeviceType, ElementType, InferRequest, RwPropertyKey, Shape, Tensor,
+};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use super::types::OcrError;
 
@@ -60,15 +62,15 @@ fn get_cache_dir() -> PathBuf {
 /// OpenVINO 推理会话
 ///
 /// 封装 CompiledModel 和 InferRequest 池，提供线程安全的并行推理接口。
-/// 
+///
 /// # 性能优化
-/// 
+///
 /// - **InferRequest 池**：预创建多个 InferRequest，支持真正的并行推理
 /// - 使用 crossbeam 的 ArrayQueue 实现无锁对象池
 /// - 线程从池中取出请求 → 推理 → 放回池中
-/// 
+///
 /// # 线程安全
-/// 
+///
 /// - CompiledModel 使用 Mutex 保护（仅用于创建新的 InferRequest）
 /// - InferRequest 池使用无锁队列，支持高并发访问
 pub struct InferenceSession {
@@ -126,15 +128,16 @@ impl InferenceSession {
             model_bytes.len(),
             pool_size
         );
-        
+
         // 创建 OpenVINO Core
         let mut core = Core::new()
             .map_err(|e| OcrError::ModelLoadError(format!("OpenVINO Core 初始化失败: {:?}", e)))?;
-        
+
         // 从内存加载 ONNX 模型
-        let model = core.read_model_from_buffer(model_bytes, None)
-            .map_err(|e| OcrError::ModelLoadError(format!("加载 {} 模型失败: {:?}", model_name, e)))?;
-        
+        let model = core.read_model_from_buffer(model_bytes, None).map_err(|e| {
+            OcrError::ModelLoadError(format!("加载 {} 模型失败: {:?}", model_name, e))
+        })?;
+
         // 使用通用方法完成剩余初始化
         Self::initialize_session(core, model, model_name, pool_size)
     }
@@ -196,33 +199,36 @@ impl InferenceSession {
             bin_bytes.len(),
             pool_size
         );
-        
+
         // 创建 OpenVINO Core
         let mut core = Core::new()
             .map_err(|e| OcrError::ModelLoadError(format!("OpenVINO Core 初始化失败: {:?}", e)))?;
-        
+
         // 将 BIN 数据包装为 Tensor（openvino-rs 要求权重以 Tensor 形式传入）
         let weights_shape = Shape::new(&[bin_bytes.len() as i64])
             .map_err(|e| OcrError::ModelLoadError(format!("创建权重 Shape 失败: {:?}", e)))?;
         let mut weights_tensor = Tensor::new(ElementType::U8, &weights_shape)
             .map_err(|e| OcrError::ModelLoadError(format!("创建权重 Tensor 失败: {:?}", e)))?;
-        
+
         // 将 BIN 字节拷贝到 Tensor 缓冲区
         {
-            let buffer = weights_tensor.get_data_mut::<u8>()
-                .map_err(|e| OcrError::ModelLoadError(format!("获取权重 Tensor 缓冲区失败: {:?}", e)))?;
+            let buffer = weights_tensor.get_data_mut::<u8>().map_err(|e| {
+                OcrError::ModelLoadError(format!("获取权重 Tensor 缓冲区失败: {:?}", e))
+            })?;
             buffer.copy_from_slice(bin_bytes);
         }
-        
+
         // 从内存加载 IR 模型（XML + BIN Tensor）
-        let model = core.read_model_from_buffer(xml_bytes, Some(&weights_tensor))
-            .map_err(|e| OcrError::ModelLoadError(format!("加载 {} IR 模型失败: {:?}", model_name, e)))?;
-        
+        let model = core.read_model_from_buffer(xml_bytes, Some(&weights_tensor)).map_err(|e| {
+            OcrError::ModelLoadError(format!("加载 {} IR 模型失败: {:?}", model_name, e))
+        })?;
+
         // 打印模型输入信息（用于调试）
-        let inputs_len = model.get_inputs_len()
+        let inputs_len = model
+            .get_inputs_len()
             .map_err(|e| OcrError::ModelLoadError(format!("获取模型输入数量失败: {:?}", e)))?;
         tracing::info!("{} IR 模型输入数量: {}", model_name, inputs_len);
-        
+
         // 使用通用方法完成剩余初始化
         Self::initialize_session(core, model, model_name, pool_size)
     }
@@ -236,20 +242,21 @@ impl InferenceSession {
         model_name: &str,
         pool_size: usize,
     ) -> Result<Self, OcrError> {
-        
         // ========================================
         // 屏蔽 OneDNN 逐操作 verbose 日志
         // ========================================
         // OneDNN 的 verbose 日志会在终端输出大量无用的卷积/重排序操作细节，
         // 例如 "onednn_verbose,v1,primitive,exec,cpu,convolution,..."
         // 仅在用户未显式设置时才屏蔽，保留手动调试的能力
-        static ONEDNN_CONFIGURED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static ONEDNN_CONFIGURED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         if !ONEDNN_CONFIGURED.swap(true, std::sync::atomic::Ordering::Relaxed)
-            && std::env::var("ONEDNN_VERBOSE").is_err() {
-                std::env::set_var("ONEDNN_VERBOSE", "0");
-                tracing::debug!("已屏蔽 OneDNN verbose 日志（设置 ONEDNN_VERBOSE=1 可重新开启）");
-            }
-        
+            && std::env::var("ONEDNN_VERBOSE").is_err()
+        {
+            std::env::set_var("ONEDNN_VERBOSE", "0");
+            tracing::debug!("已屏蔽 OneDNN verbose 日志（设置 ONEDNN_VERBOSE=1 可重新开启）");
+        }
+
         // ========================================
         // 性能优化 1: Model Caching
         // ========================================
@@ -263,7 +270,7 @@ impl InferenceSession {
                 Err(e) => tracing::warn!("设置 CACHE_DIR 失败: {:?}", e),
             }
         }
-        
+
         // ========================================
         // 性能优化 2: Performance Hint
         // ========================================
@@ -272,7 +279,7 @@ impl InferenceSession {
             Ok(_) => tracing::info!("✅ Performance Hint 已设置: LATENCY"),
             Err(e) => tracing::warn!("设置 PERFORMANCE_HINT 失败: {:?}", e),
         }
-        
+
         // ========================================
         // 编译模型（始终使用 CPU）
         // ========================================
@@ -282,34 +289,32 @@ impl InferenceSession {
         // - AMD/NVIDIA GPU: OpenVINO 不支持
         // CPU + AVX2 是当前最优方案（1080p 截图 OCR < 2 秒）
         let compile_start = std::time::Instant::now();
-        let mut compiled_model = core.compile_model(&model, DeviceType::CPU)
-            .map_err(|e| OcrError::ModelLoadError(format!("编译 {} 模型失败: {:?}", model_name, e)))?;
-        
+        let mut compiled_model = core.compile_model(&model, DeviceType::CPU).map_err(|e| {
+            OcrError::ModelLoadError(format!("编译 {} 模型失败: {:?}", model_name, e))
+        })?;
+
         let compile_elapsed = compile_start.elapsed();
         tracing::info!(
             "{} 模型编译完成 [CPU]，耗时 {:.0}ms (缓存命中时 < 100ms)",
             model_name,
             compile_elapsed.as_millis()
         );
-        
+
         // 创建 InferRequest 池
         let pool = ArrayQueue::new(pool_size);
         for i in 0..pool_size {
-            let infer_request = compiled_model.create_infer_request()
-                .map_err(|e| OcrError::ModelLoadError(format!(
+            let infer_request = compiled_model.create_infer_request().map_err(|e| {
+                OcrError::ModelLoadError(format!(
                     "创建 {} 推理请求 #{} 失败: {:?}",
                     model_name, i, e
-                )))?;
+                ))
+            })?;
             // 忽略 push 错误（池已满不可能发生）
             let _ = pool.push(infer_request);
         }
-        
-        tracing::info!(
-            "{} 模型加载成功（已创建 {} 个 InferRequest）",
-            model_name,
-            pool_size
-        );
-        
+
+        tracing::info!("{} 模型加载成功（已创建 {} 个 InferRequest）", model_name, pool_size);
+
         Ok(Self {
             compiled_model: Mutex::new(compiled_model),
             infer_request_pool: Arc::new(pool),
@@ -326,17 +331,17 @@ impl InferenceSession {
         if let Some(req) = self.infer_request_pool.pop() {
             return Ok(req);
         }
-        
+
         // 池为空，创建新的请求（这种情况应该很少发生）
-        tracing::warn!(
-            "{} InferRequest 池已空，创建新请求（可能影响性能）",
-            self.model_name
-        );
-        
-        let mut compiled_model = self.compiled_model.lock()
+        tracing::warn!("{} InferRequest 池已空，创建新请求（可能影响性能）", self.model_name);
+
+        let mut compiled_model = self
+            .compiled_model
+            .lock()
             .map_err(|e| OcrError::InferenceError(format!("获取模型锁失败: {}", e)))?;
-        
-        compiled_model.create_infer_request()
+
+        compiled_model
+            .create_infer_request()
             .map_err(|e| OcrError::InferenceError(format!("创建推理请求失败: {:?}", e)))
     }
 
@@ -375,16 +380,17 @@ impl InferenceSession {
         let channels = shape[1];
         let height = shape[2];
         let width = shape[3];
-        
+
         // 从池中获取 InferRequest
         let mut infer_request = self.acquire_infer_request()?;
-        
+
         // 使用 RAII 模式确保 InferRequest 被放回池中
-        let result = self.run_detection_inference(&mut infer_request, input, batch, channels, height, width);
-        
+        let result =
+            self.run_detection_inference(&mut infer_request, input, batch, channels, height, width);
+
         // 无论成功还是失败，都放回池中
         self.release_infer_request(infer_request);
-        
+
         result
     }
 
@@ -405,28 +411,45 @@ impl InferenceSession {
     /// - 无需 Rust 侧归一化，预处理在模型内部执行
     /// - 减少内存分配（u8 vs f32）
     /// - 预期性能提升 30%-100%
-    pub fn infer_detection_u8(&self, input: &[u8], height: usize, width: usize) -> Result<Array4<f32>, OcrError> {
+    pub fn infer_detection_u8(
+        &self,
+        input: &[u8],
+        height: usize,
+        width: usize,
+    ) -> Result<Array4<f32>, OcrError> {
         let batch = 1;
         let channels = 3;
-        
+
         // 验证输入大小
         let expected_size = batch * height * width * channels;
         if input.len() != expected_size {
             return Err(OcrError::InferenceError(format!(
                 "输入大小不匹配: 期望 {} bytes ({}x{}x{}x{}), 实际 {} bytes",
-                expected_size, batch, height, width, channels, input.len()
+                expected_size,
+                batch,
+                height,
+                width,
+                channels,
+                input.len()
             )));
         }
-        
+
         // 从池中获取 InferRequest
         let mut infer_request = self.acquire_infer_request()?;
-        
+
         // 执行推理
-        let result = self.run_detection_inference_u8(&mut infer_request, input, batch, height, width, channels);
-        
+        let result = self.run_detection_inference_u8(
+            &mut infer_request,
+            input,
+            batch,
+            height,
+            width,
+            channels,
+        );
+
         // 放回池中
         self.release_infer_request(infer_request);
-        
+
         result
     }
 
@@ -443,51 +466,57 @@ impl InferenceSession {
         // 创建输入 Shape (NHWC 格式)
         let input_shape = Shape::new(&[batch as i64, height as i64, width as i64, channels as i64])
             .map_err(|e| OcrError::InferenceError(format!("创建输入 Shape 失败: {:?}", e)))?;
-        
+
         // 创建 u8 类型的输入 Tensor
         let mut input_tensor = Tensor::new(ElementType::U8, &input_shape)
             .map_err(|e| OcrError::InferenceError(format!("创建输入 Tensor 失败: {:?}", e)))?;
-        
+
         // 填充数据
         {
-            let tensor_data = input_tensor.get_data_mut::<u8>()
+            let tensor_data = input_tensor
+                .get_data_mut::<u8>()
                 .map_err(|e| OcrError::InferenceError(format!("获取 Tensor 数据失败: {:?}", e)))?;
             tensor_data.copy_from_slice(input);
         }
-        
+
         // 设置输入
-        infer_request.set_input_tensor(&input_tensor)
+        infer_request
+            .set_input_tensor(&input_tensor)
             .map_err(|e| OcrError::InferenceError(format!("设置输入 Tensor 失败: {:?}", e)))?;
-        
+
         // 执行推理
-        infer_request.infer()
-            .map_err(|e| OcrError::InferenceError(format!("{} 推理失败: {:?}", self.model_name, e)))?;
-        
+        infer_request.infer().map_err(|e| {
+            OcrError::InferenceError(format!("{} 推理失败: {:?}", self.model_name, e))
+        })?;
+
         // 获取输出
-        let output_tensor = infer_request.get_output_tensor()
+        let output_tensor = infer_request
+            .get_output_tensor()
             .map_err(|e| OcrError::InferenceError(format!("获取输出 Tensor 失败: {:?}", e)))?;
-        
+
         // 获取输出形状
-        let output_shape = output_tensor.get_shape()
+        let output_shape = output_tensor
+            .get_shape()
             .map_err(|e| OcrError::InferenceError(format!("获取输出形状失败: {:?}", e)))?;
         let dims: Vec<usize> = output_shape.get_dimensions().iter().map(|&x| x as usize).collect();
-        
+
         if dims.len() != 4 {
             return Err(OcrError::InferenceError(format!(
-                "检测模型输出维度错误: 期望 4D，实际 {:?}", dims
+                "检测模型输出维度错误: 期望 4D，实际 {:?}",
+                dims
             )));
         }
-        
+
         // 提取输出数据
-        let output_data = output_tensor.get_data::<f32>()
+        let output_data = output_tensor
+            .get_data::<f32>()
             .map_err(|e| OcrError::InferenceError(format!("提取输出数据失败: {:?}", e)))?;
-        
+
         // 转换为 Array4
-        let output_array = Array4::from_shape_vec(
-            (dims[0], dims[1], dims[2], dims[3]),
-            output_data.to_vec(),
-        ).map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
-        
+        let output_array =
+            Array4::from_shape_vec((dims[0], dims[1], dims[2], dims[3]), output_data.to_vec())
+                .map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
+
         Ok(output_array)
     }
 
@@ -504,55 +533,61 @@ impl InferenceSession {
         // 创建输入 Shape
         let input_shape = Shape::new(&[batch as i64, channels as i64, height as i64, width as i64])
             .map_err(|e| OcrError::InferenceError(format!("创建输入 Shape 失败: {:?}", e)))?;
-        
+
         // 创建输入 Tensor 并填充数据
         let mut input_tensor = Tensor::new(ElementType::F32, &input_shape)
             .map_err(|e| OcrError::InferenceError(format!("创建输入 Tensor 失败: {:?}", e)))?;
-        
+
         // 获取 Tensor 的可变数据切片并复制数据
         {
-            let tensor_data = input_tensor.get_data_mut::<f32>()
+            let tensor_data = input_tensor
+                .get_data_mut::<f32>()
                 .map_err(|e| OcrError::InferenceError(format!("获取 Tensor 数据失败: {:?}", e)))?;
             let input_data: Vec<f32> = input.iter().cloned().collect();
             tensor_data.copy_from_slice(&input_data);
         }
-        
+
         // 设置输入
-        infer_request.set_input_tensor(&input_tensor)
+        infer_request
+            .set_input_tensor(&input_tensor)
             .map_err(|e| OcrError::InferenceError(format!("设置输入 Tensor 失败: {:?}", e)))?;
-        
+
         // 执行推理
-        infer_request.infer()
-            .map_err(|e| OcrError::InferenceError(format!("{} 推理失败: {:?}", self.model_name, e)))?;
-        
+        infer_request.infer().map_err(|e| {
+            OcrError::InferenceError(format!("{} 推理失败: {:?}", self.model_name, e))
+        })?;
+
         // 获取输出
-        let output_tensor = infer_request.get_output_tensor()
+        let output_tensor = infer_request
+            .get_output_tensor()
             .map_err(|e| OcrError::InferenceError(format!("获取输出 Tensor 失败: {:?}", e)))?;
-        
+
         // 获取输出形状
-        let output_shape = output_tensor.get_shape()
+        let output_shape = output_tensor
+            .get_shape()
             .map_err(|e| OcrError::InferenceError(format!("获取输出形状失败: {:?}", e)))?;
         let dims: Vec<usize> = output_shape.get_dimensions().iter().map(|&x| x as usize).collect();
-        
+
         if dims.len() != 4 {
             return Err(OcrError::InferenceError(format!(
-                "检测模型输出维度错误: 期望 4D，实际 {:?}", dims
+                "检测模型输出维度错误: 期望 4D，实际 {:?}",
+                dims
             )));
         }
-        
+
         // 提取输出数据
-        let output_data = output_tensor.get_data::<f32>()
+        let output_data = output_tensor
+            .get_data::<f32>()
             .map_err(|e| OcrError::InferenceError(format!("提取输出数据失败: {:?}", e)))?;
-        
+
         // 转换为 Array4
-        let output_array = Array4::from_shape_vec(
-            (dims[0], dims[1], dims[2], dims[3]),
-            output_data.to_vec(),
-        ).map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
-        
+        let output_array =
+            Array4::from_shape_vec((dims[0], dims[1], dims[2], dims[3]), output_data.to_vec())
+                .map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
+
         Ok(output_array)
     }
-    
+
     /// 执行识别模型推理
     ///
     /// # 参数
@@ -562,9 +597,9 @@ impl InferenceSession {
     /// # 返回
     ///
     /// - `Ok(Array3<f32>)`: 输出概率 [1, T, V]
-    /// 
+    ///
     /// # 并行推理支持
-    /// 
+    ///
     /// 此方法使用 InferRequest 池，支持多线程并行调用。
     /// 每个线程从池中获取独立的 InferRequest，推理完成后放回池中。
     pub fn infer_recognition(&self, input: &Array4<f32>) -> Result<Array3<f32>, OcrError> {
@@ -573,7 +608,7 @@ impl InferenceSession {
         let channels = shape[1];
         let height = shape[2];
         let width = shape[3];
-        
+
         // 调试日志
         let input_slice = input.as_slice().unwrap_or(&[]);
         if !input_slice.is_empty() {
@@ -581,19 +616,31 @@ impl InferenceSession {
             let max = input_slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             tracing::debug!(
                 "Recognition input: shape=[{}, {}, {}, {}], value_range=[{:.3}, {:.3}]",
-                batch, channels, height, width, min, max
+                batch,
+                channels,
+                height,
+                width,
+                min,
+                max
             );
         }
-        
+
         // 从池中获取 InferRequest（支持并行）
         let mut infer_request = self.acquire_infer_request()?;
-        
+
         // 使用 RAII 模式确保 InferRequest 被放回池中
-        let result = self.run_recognition_inference(&mut infer_request, input, batch, channels, height, width);
-        
+        let result = self.run_recognition_inference(
+            &mut infer_request,
+            input,
+            batch,
+            channels,
+            height,
+            width,
+        );
+
         // 无论成功还是失败，都放回池中
         self.release_infer_request(infer_request);
-        
+
         result
     }
 
@@ -616,28 +663,45 @@ impl InferenceSession {
     /// - 无需 Rust 侧归一化，预处理在模型内部执行
     /// - 减少内存分配（u8 vs f32）
     /// - 预期性能提升 30%-100%
-    pub fn infer_recognition_u8(&self, input: &[u8], height: usize, width: usize) -> Result<Array3<f32>, OcrError> {
+    pub fn infer_recognition_u8(
+        &self,
+        input: &[u8],
+        height: usize,
+        width: usize,
+    ) -> Result<Array3<f32>, OcrError> {
         let batch = 1;
         let channels = 3;
-        
+
         // 验证输入大小
         let expected_size = batch * height * width * channels;
         if input.len() != expected_size {
             return Err(OcrError::InferenceError(format!(
                 "输入大小不匹配: 期望 {} bytes ({}x{}x{}x{}), 实际 {} bytes",
-                expected_size, batch, height, width, channels, input.len()
+                expected_size,
+                batch,
+                height,
+                width,
+                channels,
+                input.len()
             )));
         }
-        
+
         // 从池中获取 InferRequest
         let mut infer_request = self.acquire_infer_request()?;
-        
+
         // 执行推理
-        let result = self.run_recognition_inference_u8(&mut infer_request, input, batch, height, width, channels);
-        
+        let result = self.run_recognition_inference_u8(
+            &mut infer_request,
+            input,
+            batch,
+            height,
+            width,
+            channels,
+        );
+
         // 放回池中
         self.release_infer_request(infer_request);
-        
+
         result
     }
 
@@ -654,51 +718,57 @@ impl InferenceSession {
         // 创建输入 Shape (NHWC 格式)
         let input_shape = Shape::new(&[batch as i64, height as i64, width as i64, channels as i64])
             .map_err(|e| OcrError::InferenceError(format!("创建输入 Shape 失败: {:?}", e)))?;
-        
+
         // 创建 u8 类型的输入 Tensor
         let mut input_tensor = Tensor::new(ElementType::U8, &input_shape)
             .map_err(|e| OcrError::InferenceError(format!("创建输入 Tensor 失败: {:?}", e)))?;
-        
+
         // 填充数据
         {
-            let tensor_data = input_tensor.get_data_mut::<u8>()
+            let tensor_data = input_tensor
+                .get_data_mut::<u8>()
                 .map_err(|e| OcrError::InferenceError(format!("获取 Tensor 数据失败: {:?}", e)))?;
             tensor_data.copy_from_slice(input);
         }
-        
+
         // 设置输入
-        infer_request.set_input_tensor(&input_tensor)
+        infer_request
+            .set_input_tensor(&input_tensor)
             .map_err(|e| OcrError::InferenceError(format!("设置输入 Tensor 失败: {:?}", e)))?;
-        
+
         // 执行推理
-        infer_request.infer()
-            .map_err(|e| OcrError::InferenceError(format!("{} 推理失败: {:?}", self.model_name, e)))?;
-        
+        infer_request.infer().map_err(|e| {
+            OcrError::InferenceError(format!("{} 推理失败: {:?}", self.model_name, e))
+        })?;
+
         // 获取输出
-        let output_tensor = infer_request.get_output_tensor()
+        let output_tensor = infer_request
+            .get_output_tensor()
             .map_err(|e| OcrError::InferenceError(format!("获取输出 Tensor 失败: {:?}", e)))?;
-        
+
         // 获取输出形状
-        let output_shape = output_tensor.get_shape()
+        let output_shape = output_tensor
+            .get_shape()
             .map_err(|e| OcrError::InferenceError(format!("获取输出形状失败: {:?}", e)))?;
         let dims: Vec<usize> = output_shape.get_dimensions().iter().map(|&x| x as usize).collect();
-        
+
         if dims.len() != 3 {
             return Err(OcrError::InferenceError(format!(
-                "识别模型输出维度错误: 期望 3D [B, T, V]，实际 {:?}", dims
+                "识别模型输出维度错误: 期望 3D [B, T, V]，实际 {:?}",
+                dims
             )));
         }
-        
+
         // 提取输出数据
-        let output_data = output_tensor.get_data::<f32>()
+        let output_data = output_tensor
+            .get_data::<f32>()
             .map_err(|e| OcrError::InferenceError(format!("提取输出数据失败: {:?}", e)))?;
-        
+
         // 转换为 Array3
-        let output_array = Array3::from_shape_vec(
-            (dims[0], dims[1], dims[2]),
-            output_data.to_vec(),
-        ).map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
-        
+        let output_array =
+            Array3::from_shape_vec((dims[0], dims[1], dims[2]), output_data.to_vec())
+                .map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
+
         Ok(output_array)
     }
 
@@ -715,52 +785,58 @@ impl InferenceSession {
         // 创建输入 Shape
         let input_shape = Shape::new(&[batch as i64, channels as i64, height as i64, width as i64])
             .map_err(|e| OcrError::InferenceError(format!("创建输入 Shape 失败: {:?}", e)))?;
-        
+
         // 创建输入 Tensor 并填充数据
         let mut input_tensor = Tensor::new(ElementType::F32, &input_shape)
             .map_err(|e| OcrError::InferenceError(format!("创建输入 Tensor 失败: {:?}", e)))?;
-        
+
         // 获取 Tensor 的可变数据切片并复制数据
         {
-            let tensor_data = input_tensor.get_data_mut::<f32>()
+            let tensor_data = input_tensor
+                .get_data_mut::<f32>()
                 .map_err(|e| OcrError::InferenceError(format!("获取 Tensor 数据失败: {:?}", e)))?;
             let input_data: Vec<f32> = input.iter().cloned().collect();
             tensor_data.copy_from_slice(&input_data);
         }
-        
+
         // 设置输入
-        infer_request.set_input_tensor(&input_tensor)
+        infer_request
+            .set_input_tensor(&input_tensor)
             .map_err(|e| OcrError::InferenceError(format!("设置输入 Tensor 失败: {:?}", e)))?;
-        
+
         // 执行推理
-        infer_request.infer()
-            .map_err(|e| OcrError::InferenceError(format!("{} 推理失败: {:?}", self.model_name, e)))?;
-        
+        infer_request.infer().map_err(|e| {
+            OcrError::InferenceError(format!("{} 推理失败: {:?}", self.model_name, e))
+        })?;
+
         // 获取输出
-        let output_tensor = infer_request.get_output_tensor()
+        let output_tensor = infer_request
+            .get_output_tensor()
             .map_err(|e| OcrError::InferenceError(format!("获取输出 Tensor 失败: {:?}", e)))?;
-        
+
         // 获取输出形状
-        let output_shape = output_tensor.get_shape()
+        let output_shape = output_tensor
+            .get_shape()
             .map_err(|e| OcrError::InferenceError(format!("获取输出形状失败: {:?}", e)))?;
         let dims: Vec<usize> = output_shape.get_dimensions().iter().map(|&x| x as usize).collect();
-        
+
         if dims.len() != 3 {
             return Err(OcrError::InferenceError(format!(
-                "识别模型输出维度错误: 期望 3D [B, T, V]，实际 {:?}", dims
+                "识别模型输出维度错误: 期望 3D [B, T, V]，实际 {:?}",
+                dims
             )));
         }
-        
+
         // 提取输出数据
-        let output_data = output_tensor.get_data::<f32>()
+        let output_data = output_tensor
+            .get_data::<f32>()
             .map_err(|e| OcrError::InferenceError(format!("提取输出数据失败: {:?}", e)))?;
-        
+
         // 转换为 Array3
-        let output_array = Array3::from_shape_vec(
-            (dims[0], dims[1], dims[2]),
-            output_data.to_vec(),
-        ).map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
-        
+        let output_array =
+            Array3::from_shape_vec((dims[0], dims[1], dims[2]), output_data.to_vec())
+                .map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
+
         Ok(output_array)
     }
 
@@ -787,16 +863,23 @@ impl InferenceSession {
         let channels = shape[1];
         let height = shape[2];
         let width = shape[3];
-        
+
         // 从池中获取 InferRequest
         let mut infer_request = self.acquire_infer_request()?;
-        
+
         // 使用 RAII 模式确保 InferRequest 被放回池中
-        let result = self.run_recognition_inference_async(&mut infer_request, input, batch, channels, height, width);
-        
+        let result = self.run_recognition_inference_async(
+            &mut infer_request,
+            input,
+            batch,
+            channels,
+            height,
+            width,
+        );
+
         // 无论成功还是失败，都放回池中
         self.release_infer_request(infer_request);
-        
+
         result
     }
 
@@ -813,56 +896,63 @@ impl InferenceSession {
         // 创建输入 Shape
         let input_shape = Shape::new(&[batch as i64, channels as i64, height as i64, width as i64])
             .map_err(|e| OcrError::InferenceError(format!("创建输入 Shape 失败: {:?}", e)))?;
-        
+
         // 创建输入 Tensor 并填充数据
         let mut input_tensor = Tensor::new(ElementType::F32, &input_shape)
             .map_err(|e| OcrError::InferenceError(format!("创建输入 Tensor 失败: {:?}", e)))?;
-        
+
         {
-            let tensor_data = input_tensor.get_data_mut::<f32>()
+            let tensor_data = input_tensor
+                .get_data_mut::<f32>()
                 .map_err(|e| OcrError::InferenceError(format!("获取 Tensor 数据失败: {:?}", e)))?;
             let input_data: Vec<f32> = input.iter().cloned().collect();
             tensor_data.copy_from_slice(&input_data);
         }
-        
+
         // 设置输入
-        infer_request.set_input_tensor(&input_tensor)
+        infer_request
+            .set_input_tensor(&input_tensor)
             .map_err(|e| OcrError::InferenceError(format!("设置输入 Tensor 失败: {:?}", e)))?;
-        
+
         // ========================================
         // 异步推理: start_async + wait
         // ========================================
         // 启动异步推理（非阻塞）
-        infer_request.infer_async()
-            .map_err(|e| OcrError::InferenceError(format!("{} 异步推理启动失败: {:?}", self.model_name, e)))?;
-        
+        infer_request.infer_async().map_err(|e| {
+            OcrError::InferenceError(format!("{} 异步推理启动失败: {:?}", self.model_name, e))
+        })?;
+
         // 等待推理完成（可以在这里做其他事情）
         // timeout: -1 表示无限等待，或者使用 ASYNC_WAIT_TIMEOUT_MS
-        infer_request.wait(ASYNC_WAIT_TIMEOUT_MS)
-            .map_err(|e| OcrError::InferenceError(format!("{} 异步推理等待超时: {:?}", self.model_name, e)))?;
-        
+        infer_request.wait(ASYNC_WAIT_TIMEOUT_MS).map_err(|e| {
+            OcrError::InferenceError(format!("{} 异步推理等待超时: {:?}", self.model_name, e))
+        })?;
+
         // 获取输出
-        let output_tensor = infer_request.get_output_tensor()
+        let output_tensor = infer_request
+            .get_output_tensor()
             .map_err(|e| OcrError::InferenceError(format!("获取输出 Tensor 失败: {:?}", e)))?;
-        
-        let output_shape = output_tensor.get_shape()
+
+        let output_shape = output_tensor
+            .get_shape()
             .map_err(|e| OcrError::InferenceError(format!("获取输出形状失败: {:?}", e)))?;
         let dims: Vec<usize> = output_shape.get_dimensions().iter().map(|&x| x as usize).collect();
-        
+
         if dims.len() != 3 {
             return Err(OcrError::InferenceError(format!(
-                "识别模型输出维度错误: 期望 3D [B, T, V]，实际 {:?}", dims
+                "识别模型输出维度错误: 期望 3D [B, T, V]，实际 {:?}",
+                dims
             )));
         }
-        
-        let output_data = output_tensor.get_data::<f32>()
+
+        let output_data = output_tensor
+            .get_data::<f32>()
             .map_err(|e| OcrError::InferenceError(format!("提取输出数据失败: {:?}", e)))?;
-        
-        let output_array = Array3::from_shape_vec(
-            (dims[0], dims[1], dims[2]),
-            output_data.to_vec(),
-        ).map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
-        
+
+        let output_array =
+            Array3::from_shape_vec((dims[0], dims[1], dims[2]), output_data.to_vec())
+                .map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
+
         Ok(output_array)
     }
 
@@ -898,13 +988,11 @@ impl InferenceSession {
         let height = inputs[0].shape()[2];
         let channels = inputs[0].shape()[1];
 
-        tracing::debug!(
-            "批量推理: {} 个样本, 高度={}, 最大宽度={}",
-            batch_size, height, max_width
-        );
+        tracing::debug!("批量推理: {} 个样本, 高度={}, 最大宽度={}", batch_size, height, max_width);
 
         // 创建批量输入张量 [N, 3, H, max_W]
-        let mut batch_tensor = ndarray::Array4::<f32>::zeros((batch_size, channels, height, max_width));
+        let mut batch_tensor =
+            ndarray::Array4::<f32>::zeros((batch_size, channels, height, max_width));
 
         // 填充数据（右侧 padding 为 0）
         for (i, input) in inputs.iter().enumerate() {
@@ -919,19 +1007,19 @@ impl InferenceSession {
         }
 
         // 获取模型锁并创建推理请求
-        let mut compiled_model = self.compiled_model.lock()
+        let mut compiled_model = self
+            .compiled_model
+            .lock()
             .map_err(|e| OcrError::InferenceError(format!("获取模型锁失败: {}", e)))?;
 
-        let mut infer_request = compiled_model.create_infer_request()
+        let mut infer_request = compiled_model
+            .create_infer_request()
             .map_err(|e| OcrError::InferenceError(format!("创建推理请求失败: {:?}", e)))?;
 
         // 创建输入 Shape
-        let input_shape = Shape::new(&[
-            batch_size as i64,
-            channels as i64,
-            height as i64,
-            max_width as i64,
-        ]).map_err(|e| OcrError::InferenceError(format!("创建输入 Shape 失败: {:?}", e)))?;
+        let input_shape =
+            Shape::new(&[batch_size as i64, channels as i64, height as i64, max_width as i64])
+                .map_err(|e| OcrError::InferenceError(format!("创建输入 Shape 失败: {:?}", e)))?;
 
         // 创建输入 Tensor
         let mut input_tensor = Tensor::new(ElementType::F32, &input_shape)
@@ -939,34 +1027,41 @@ impl InferenceSession {
 
         // 填充数据
         {
-            let tensor_data = input_tensor.get_data_mut::<f32>()
+            let tensor_data = input_tensor
+                .get_data_mut::<f32>()
                 .map_err(|e| OcrError::InferenceError(format!("获取 Tensor 数据失败: {:?}", e)))?;
             let input_data: Vec<f32> = batch_tensor.iter().cloned().collect();
             tensor_data.copy_from_slice(&input_data);
         }
 
         // 设置输入并执行推理
-        infer_request.set_input_tensor(&input_tensor)
+        infer_request
+            .set_input_tensor(&input_tensor)
             .map_err(|e| OcrError::InferenceError(format!("设置输入 Tensor 失败: {:?}", e)))?;
 
-        infer_request.infer()
-            .map_err(|e| OcrError::InferenceError(format!("{} 批量推理失败: {:?}", self.model_name, e)))?;
+        infer_request.infer().map_err(|e| {
+            OcrError::InferenceError(format!("{} 批量推理失败: {:?}", self.model_name, e))
+        })?;
 
         // 获取输出
-        let output_tensor = infer_request.get_output_tensor()
+        let output_tensor = infer_request
+            .get_output_tensor()
             .map_err(|e| OcrError::InferenceError(format!("获取输出 Tensor 失败: {:?}", e)))?;
 
-        let output_shape = output_tensor.get_shape()
+        let output_shape = output_tensor
+            .get_shape()
             .map_err(|e| OcrError::InferenceError(format!("获取输出形状失败: {:?}", e)))?;
         let dims: Vec<usize> = output_shape.get_dimensions().iter().map(|&x| x as usize).collect();
 
         if dims.len() != 3 {
             return Err(OcrError::InferenceError(format!(
-                "批量识别输出维度错误: 期望 3D [N, T, V]，实际 {:?}", dims
+                "批量识别输出维度错误: 期望 3D [N, T, V]，实际 {:?}",
+                dims
             )));
         }
 
-        let output_data = output_tensor.get_data::<f32>()
+        let output_data = output_tensor
+            .get_data::<f32>()
             .map_err(|e| OcrError::InferenceError(format!("提取输出数据失败: {:?}", e)))?;
 
         // 拆分批量输出为单独的 Array3
@@ -979,15 +1074,18 @@ impl InferenceSession {
             let end = start + timesteps * vocab_size;
             let slice = &output_data[start..end];
 
-            let arr = Array3::from_shape_vec(
-                (1, timesteps, vocab_size),
-                slice.to_vec(),
-            ).map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
+            let arr = Array3::from_shape_vec((1, timesteps, vocab_size), slice.to_vec())
+                .map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
 
             results.push(arr);
         }
 
-        tracing::debug!("批量推理完成: {} 个结果, 每个形状 [1, {}, {}]", results.len(), timesteps, vocab_size);
+        tracing::debug!(
+            "批量推理完成: {} 个结果, 每个形状 [1, {}, {}]",
+            results.len(),
+            timesteps,
+            vocab_size
+        );
 
         Ok(results)
     }
@@ -1013,7 +1111,7 @@ impl InferenceSession {
     /// - 减少 CPU-GPU 数据传输次数
     pub fn infer_recognition_batch_u8(
         &self,
-        inputs: &[(Vec<u8>, usize, usize)],  // (data, height, width)
+        inputs: &[(Vec<u8>, usize, usize)], // (data, height, width)
         max_width: usize,
     ) -> Result<Vec<Array3<f32>>, OcrError> {
         if inputs.is_empty() {
@@ -1021,12 +1119,14 @@ impl InferenceSession {
         }
 
         let batch_size = inputs.len();
-        let height = inputs[0].1;  // 所有输入高度相同（通常为 48）
+        let height = inputs[0].1; // 所有输入高度相同（通常为 48）
         let channels = 3;
 
         tracing::debug!(
             "批量推理 (u8): {} 个样本, 高度={}, 最大宽度={}",
-            batch_size, height, max_width
+            batch_size,
+            height,
+            max_width
         );
 
         // 创建批量输入张量 [N, H, max_W, 3] (NHWC 格式)
@@ -1041,13 +1141,13 @@ impl InferenceSession {
                     height, h, i
                 )));
             }
-            
+
             // 复制每一行数据
             for y in 0..height {
                 let src_start = y * w * channels;
                 let src_end = src_start + w * channels;
                 let dst_start = i * height * max_width * channels + y * max_width * channels;
-                
+
                 if src_end <= data.len() {
                     batch_data[dst_start..dst_start + w * channels]
                         .copy_from_slice(&data[src_start..src_end]);
@@ -1056,19 +1156,19 @@ impl InferenceSession {
         }
 
         // 获取模型锁并创建推理请求
-        let mut compiled_model = self.compiled_model.lock()
+        let mut compiled_model = self
+            .compiled_model
+            .lock()
             .map_err(|e| OcrError::InferenceError(format!("获取模型锁失败: {}", e)))?;
 
-        let mut infer_request = compiled_model.create_infer_request()
+        let mut infer_request = compiled_model
+            .create_infer_request()
             .map_err(|e| OcrError::InferenceError(format!("创建推理请求失败: {:?}", e)))?;
 
         // 创建输入 Shape (NHWC 格式)
-        let input_shape = Shape::new(&[
-            batch_size as i64,
-            height as i64,
-            max_width as i64,
-            channels as i64,
-        ]).map_err(|e| OcrError::InferenceError(format!("创建输入 Shape 失败: {:?}", e)))?;
+        let input_shape =
+            Shape::new(&[batch_size as i64, height as i64, max_width as i64, channels as i64])
+                .map_err(|e| OcrError::InferenceError(format!("创建输入 Shape 失败: {:?}", e)))?;
 
         // 创建 u8 类型的输入 Tensor
         let mut input_tensor = Tensor::new(ElementType::U8, &input_shape)
@@ -1076,33 +1176,40 @@ impl InferenceSession {
 
         // 填充数据
         {
-            let tensor_data = input_tensor.get_data_mut::<u8>()
+            let tensor_data = input_tensor
+                .get_data_mut::<u8>()
                 .map_err(|e| OcrError::InferenceError(format!("获取 Tensor 数据失败: {:?}", e)))?;
             tensor_data.copy_from_slice(&batch_data);
         }
 
         // 设置输入并执行推理
-        infer_request.set_input_tensor(&input_tensor)
+        infer_request
+            .set_input_tensor(&input_tensor)
             .map_err(|e| OcrError::InferenceError(format!("设置输入 Tensor 失败: {:?}", e)))?;
 
-        infer_request.infer()
-            .map_err(|e| OcrError::InferenceError(format!("{} 批量推理失败: {:?}", self.model_name, e)))?;
+        infer_request.infer().map_err(|e| {
+            OcrError::InferenceError(format!("{} 批量推理失败: {:?}", self.model_name, e))
+        })?;
 
         // 获取输出
-        let output_tensor = infer_request.get_output_tensor()
+        let output_tensor = infer_request
+            .get_output_tensor()
             .map_err(|e| OcrError::InferenceError(format!("获取输出 Tensor 失败: {:?}", e)))?;
 
-        let output_shape = output_tensor.get_shape()
+        let output_shape = output_tensor
+            .get_shape()
             .map_err(|e| OcrError::InferenceError(format!("获取输出形状失败: {:?}", e)))?;
         let dims: Vec<usize> = output_shape.get_dimensions().iter().map(|&x| x as usize).collect();
 
         if dims.len() != 3 {
             return Err(OcrError::InferenceError(format!(
-                "批量识别输出维度错误: 期望 3D [N, T, V]，实际 {:?}", dims
+                "批量识别输出维度错误: 期望 3D [N, T, V]，实际 {:?}",
+                dims
             )));
         }
 
-        let output_data = output_tensor.get_data::<f32>()
+        let output_data = output_tensor
+            .get_data::<f32>()
             .map_err(|e| OcrError::InferenceError(format!("提取输出数据失败: {:?}", e)))?;
 
         // 拆分批量输出为单独的 Array3
@@ -1115,15 +1222,18 @@ impl InferenceSession {
             let end = start + timesteps * vocab_size;
             let slice = &output_data[start..end];
 
-            let arr = Array3::from_shape_vec(
-                (1, timesteps, vocab_size),
-                slice.to_vec(),
-            ).map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
+            let arr = Array3::from_shape_vec((1, timesteps, vocab_size), slice.to_vec())
+                .map_err(|e| OcrError::InferenceError(format!("转换输出数组失败: {}", e)))?;
 
             results.push(arr);
         }
 
-        tracing::debug!("批量推理 (u8) 完成: {} 个结果, 每个形状 [1, {}, {}]", results.len(), timesteps, vocab_size);
+        tracing::debug!(
+            "批量推理 (u8) 完成: {} 个结果, 每个形状 [1, {}, {}]",
+            results.len(),
+            timesteps,
+            vocab_size
+        );
 
         Ok(results)
     }
@@ -1133,15 +1243,12 @@ impl InferenceSession {
 pub fn get_openvino_info() -> String {
     match Core::new() {
         Ok(core) => {
-            let devices = core.available_devices()
+            let devices = core
+                .available_devices()
                 .map(|d| format!("{:?}", d))
                 .unwrap_or_else(|_| "unknown".to_string());
             let cache_dir = get_cache_dir();
-            format!(
-                "OpenVINO 推理引擎: 可用设备={}, 缓存目录={}",
-                devices,
-                cache_dir.display()
-            )
+            format!("OpenVINO 推理引擎: 可用设备={}, 缓存目录={}", devices, cache_dir.display())
         }
         Err(e) => format!("OpenVINO 推理引擎: 初始化失败 - {:?}", e),
     }
