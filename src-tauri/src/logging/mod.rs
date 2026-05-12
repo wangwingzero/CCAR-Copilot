@@ -58,6 +58,25 @@ pub const LOG_RETENTION_DAYS: u64 = 30;
 /// 日志级别环境变量名
 const LOG_LEVEL_ENV: &str = "HUGE_LOG";
 
+/// 高频第三方依赖日志过滤。
+///
+/// 调试版需要保留本项目日志，但 HTML 解析器和底层事件循环的 debug/warn
+/// 对业务排障价值很低，会把终端刷屏。
+const NOISY_DEPENDENCY_DIRECTIVES: &[&str] = &[
+    "html5ever=error",
+    "markup5ever=error",
+    "selectors=warn",
+    "openvino_finder=warn",
+    "hyper_util=warn",
+    "reqwest=warn",
+    "tao::platform_impl::platform::event_loop::runner=error",
+    "ccar_copilot_lib::ocr::background_cache=warn",
+    "ccar_copilot_lib::ocr::engine=info",
+    "ccar_copilot_lib::ocr::detector=info",
+    "ccar_copilot_lib::ocr::recognizer=info",
+    "ccar_copilot_lib::ocr::openvino_engine=info",
+];
+
 /// 日志系统配置
 #[derive(Debug, Clone)]
 pub struct LogConfig {
@@ -104,10 +123,7 @@ impl Default for LogConfig {
 /// 返回的 WorkerGuard 必须保持存活，否则日志可能丢失。
 /// 通常应该在 main 函数中保持其生命周期。
 pub fn setup_logging(log_dir: &Path) -> HuGeResult<WorkerGuard> {
-    setup_logging_with_config(&LogConfig {
-        log_dir: log_dir.to_path_buf(),
-        ..Default::default()
-    })
+    setup_logging_with_config(&LogConfig { log_dir: log_dir.to_path_buf(), ..Default::default() })
 }
 
 /// 使用配置初始化日志系统
@@ -124,9 +140,8 @@ pub fn setup_logging(log_dir: &Path) -> HuGeResult<WorkerGuard> {
 pub fn setup_logging_with_config(config: &LogConfig) -> HuGeResult<WorkerGuard> {
     // 确保日志目录存在
     if !config.log_dir.exists() {
-        fs::create_dir_all(&config.log_dir).map_err(|e| {
-            HuGeError::ConfigError(format!("创建日志目录失败: {}", e))
-        })?;
+        fs::create_dir_all(&config.log_dir)
+            .map_err(|e| HuGeError::ConfigError(format!("创建日志目录失败: {}", e)))?;
     }
 
     // 创建日志文件轮转器（每日轮转，保留最近 31 个文件）
@@ -144,16 +159,7 @@ pub fn setup_logging_with_config(config: &LogConfig) -> HuGeResult<WorkerGuard> 
     // 创建非阻塞写入器
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    // 构建环境过滤器
-    // 优先使用环境变量，否则使用配置的级别
-    // 对高频/低价值模块提高过滤级别，减少终端噪音
-    let env_filter = EnvFilter::try_from_env(LOG_LEVEL_ENV)
-        .unwrap_or_else(|_| {
-            EnvFilter::new(format!(
-                "{},openvino_finder=warn,hyper_util=warn,reqwest=warn,hugescreenshot_tauri_lib::ocr::background_cache=warn,hugescreenshot_tauri_lib::ocr::engine=info,hugescreenshot_tauri_lib::ocr::detector=info,hugescreenshot_tauri_lib::ocr::recognizer=info,hugescreenshot_tauri_lib::ocr::openvino_engine=info,hugescreenshot_tauri_lib::screenshot::window_detect=info",
-                config.level
-            ))
-        });
+    let env_filter = build_log_filter(config);
 
     // 创建文件日志层
     let file_layer = tracing_subscriber::fmt::layer()
@@ -175,19 +181,64 @@ pub fn setup_logging_with_config(config: &LogConfig) -> HuGeResult<WorkerGuard> 
             .with_file(false) // 控制台不显示文件名
             .with_line_number(false); // 控制台不显示行号
 
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(file_layer)
-            .with(console_layer)
-            .init();
+        tracing_subscriber::registry().with(env_filter).with(file_layer).with(console_layer).init();
     } else {
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(file_layer)
-            .init();
+        tracing_subscriber::registry().with(env_filter).with(file_layer).init();
     }
 
     Ok(guard)
+}
+
+pub(crate) fn build_log_filter(config: &LogConfig) -> EnvFilter {
+    let directives = std::env::var(LOG_LEVEL_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            if value.contains('=') || value.contains(',') {
+                append_noisy_dependency_directives(value)
+            } else {
+                build_scoped_log_directives(&value)
+            }
+        })
+        .unwrap_or_else(|| build_scoped_log_directives(&config.level.to_string()));
+
+    EnvFilter::builder().parse_lossy(directives)
+}
+
+fn build_scoped_log_directives(level: &str) -> String {
+    let app_level = normalize_log_level(level);
+    let dependency_level = match app_level {
+        "warn" => "warn",
+        "error" => "error",
+        _ => "info",
+    };
+
+    let directives = vec![
+        dependency_level.to_string(),
+        format!("ccar_copilot_lib={}", app_level),
+        format!("ccar_copilot={}", app_level),
+    ];
+
+    append_noisy_dependency_directives(directives.join(","))
+}
+
+fn append_noisy_dependency_directives(mut directives: String) -> String {
+    for directive in NOISY_DEPENDENCY_DIRECTIVES {
+        directives.push(',');
+        directives.push_str(directive);
+    }
+    directives
+}
+
+fn normalize_log_level(level: &str) -> &'static str {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "trace" => "trace",
+        "debug" => "debug",
+        "warn" | "warning" => "warn",
+        "error" => "error",
+        _ => "info",
+    }
 }
 
 /// 清理旧日志文件
@@ -218,13 +269,12 @@ pub fn cleanup_old_logs(log_dir: &Path, retention_days: u64) -> HuGeResult<usize
     let now = SystemTime::now();
     let mut deleted_count = 0;
 
-    let entries = fs::read_dir(log_dir).map_err(|e| {
-        HuGeError::ConfigError(format!("读取日志目录失败: {}", e))
-    })?;
+    let entries = fs::read_dir(log_dir)
+        .map_err(|e| HuGeError::ConfigError(format!("读取日志目录失败: {}", e)))?;
 
     for entry in entries.flatten() {
         let path = entry.path();
-        
+
         // 只处理日志文件
         if !is_log_file(&path) {
             continue;
@@ -307,9 +357,10 @@ pub fn get_log_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> HuGeResult<P
     }
 
     // 回退到 app_data_dir/logs
-    let app_data_dir = app.path().app_data_dir().map_err(|e| {
-        HuGeError::ConfigError(format!("获取应用数据目录失败: {}", e))
-    })?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| HuGeError::ConfigError(format!("获取应用数据目录失败: {}", e)))?;
 
     Ok(app_data_dir.join("logs"))
 }
@@ -392,19 +443,37 @@ mod tests {
     }
 
     #[test]
+    fn test_debug_filter_scopes_to_app_crate() {
+        let directives = build_scoped_log_directives("debug");
+        assert!(directives.starts_with("info,"));
+        assert!(directives.contains("ccar_copilot_lib=debug"));
+        assert!(directives.contains("html5ever=error"));
+        assert!(directives.contains("selectors=warn"));
+        assert!(!directives.starts_with("debug,"));
+    }
+
+    #[test]
+    fn test_warn_filter_reduces_dependency_output() {
+        let directives = build_scoped_log_directives("warn");
+        assert!(directives.starts_with("warn,"));
+        assert!(directives.contains("ccar_copilot_lib=warn"));
+        assert!(directives.contains("tao::platform_impl::platform::event_loop::runner=error"));
+    }
+
+    #[test]
     fn test_is_log_file() {
         let temp_dir = tempdir().unwrap();
-        
+
         // 创建日志文件
         let log_file = temp_dir.path().join("hugescreenshot.2024-01-01.log");
         File::create(&log_file).unwrap();
         assert!(is_log_file(&log_file));
-        
+
         // 创建非日志文件
         let other_file = temp_dir.path().join("other.txt");
         File::create(&other_file).unwrap();
         assert!(!is_log_file(&other_file));
-        
+
         // 目录不是日志文件
         let sub_dir = temp_dir.path().join("subdir");
         fs::create_dir(&sub_dir).unwrap();
@@ -428,22 +497,22 @@ mod tests {
     #[test]
     fn test_cleanup_old_logs_with_files() {
         let temp_dir = tempdir().unwrap();
-        
+
         // 创建一些日志文件
         for i in 0..5 {
             let log_file = temp_dir.path().join(format!("hugescreenshot.{}.log", i));
             let mut file = File::create(&log_file).unwrap();
             writeln!(file, "Test log content {}", i).unwrap();
         }
-        
+
         // 创建一个非日志文件
         let other_file = temp_dir.path().join("other.txt");
         File::create(&other_file).unwrap();
-        
+
         // 清理（由于文件刚创建，不会被删除）
         let result = cleanup_old_logs(temp_dir.path(), 30).unwrap();
         assert_eq!(result, 0);
-        
+
         // 验证文件仍然存在
         assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), 6);
     }
@@ -453,11 +522,11 @@ mod tests {
         // 清除环境变量
         std::env::remove_var(LOG_LEVEL_ENV);
         assert_eq!(get_current_log_level(), "info");
-        
+
         // 设置环境变量
         std::env::set_var(LOG_LEVEL_ENV, "debug");
         assert_eq!(get_current_log_level(), "debug");
-        
+
         // 清理
         std::env::remove_var(LOG_LEVEL_ENV);
     }
@@ -466,7 +535,7 @@ mod tests {
     fn test_set_log_level() {
         set_log_level("warn");
         assert_eq!(std::env::var(LOG_LEVEL_ENV).unwrap(), "warn");
-        
+
         // 清理
         std::env::remove_var(LOG_LEVEL_ENV);
     }

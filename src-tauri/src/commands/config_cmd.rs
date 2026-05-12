@@ -76,10 +76,7 @@ pub async fn import_config(file_path: String) -> HuGeResult<AppConfig> {
 
     if !path.exists() {
         error!("导入文件不存在: {}", file_path);
-        return Err(HuGeError::ConfigError(format!(
-            "导入文件不存在: {}",
-            file_path
-        )));
+        return Err(HuGeError::ConfigError(format!("导入文件不存在: {}", file_path)));
     }
 
     let content = fs::read_to_string(path).map_err(|e| {
@@ -94,6 +91,18 @@ pub async fn import_config(file_path: String) -> HuGeResult<AppConfig> {
 
     info!("配置导入成功");
     Ok(config)
+}
+
+/// 判断给定的可执行文件路径是否属于 cargo 开发态产物（`target\debug` 或 `target\release` 子目录）。
+///
+/// 这类路径在 `tauri dev` 模式下指向未安装的本地构建产物，启动后 WebView 会去访问
+/// `devUrl: http://localhost:1430` 的 Vite 开发服务器；如果开机自启动写入这种路径，
+/// 系统重启后 Vite 并未运行，会出现 `ERR_CONNECTION_TIMED_OUT` 的空白窗口。
+/// 因此开发态产物不允许被注册到 Windows 开机自启动。
+#[cfg(windows)]
+fn is_dev_build_path(exe_path: &str) -> bool {
+    let normalized = exe_path.replace('/', "\\").to_ascii_lowercase();
+    normalized.contains(r"\target\debug\") || normalized.contains(r"\target\release\")
 }
 
 /// 设置 Windows 自动启动
@@ -127,6 +136,13 @@ pub async fn set_auto_start(_app: AppHandle, enabled: bool) -> HuGeResult<()> {
 
             let exe_path_str = exe_path.to_string_lossy().to_string();
 
+            if is_dev_build_path(&exe_path_str) {
+                error!("拒绝写入开机自启动：检测到开发态产物路径 {}", exe_path_str);
+                return Err(HuGeError::ConfigError(
+                    "开发模式下不支持开机自启动，请在打包安装版本中启用此功能".to_string(),
+                ));
+            }
+
             let value = if exe_path_str.contains(' ') {
                 format!("\"{}\" --minimized", exe_path_str)
             } else {
@@ -156,9 +172,7 @@ pub async fn set_auto_start(_app: AppHandle, enabled: bool) -> HuGeResult<()> {
     #[cfg(not(windows))]
     {
         warn!("自动启动功能仅支持 Windows 平台");
-        Err(HuGeError::ConfigError(
-            "自动启动功能仅支持 Windows 平台".to_string(),
-        ))
+        Err(HuGeError::ConfigError("自动启动功能仅支持 Windows 平台".to_string()))
     }
 }
 
@@ -229,5 +243,60 @@ mod tests {
     fn test_auto_start_registry_path() {
         let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
         assert!(path.contains("Run"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_dev_build_path_detects_target_debug() {
+        assert!(is_dev_build_path(
+            r"D:\CCAR-Copilot\src-tauri\target\debug\ccar-copilot.exe"
+        ));
+        assert!(is_dev_build_path(
+            r"D:\CCAR-Copilot\src-tauri\target\release\ccar-copilot.exe"
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_dev_build_path_case_insensitive() {
+        assert!(is_dev_build_path(
+            r"D:\CCAR-Copilot\src-tauri\Target\Debug\ccar-copilot.exe"
+        ));
+        assert!(is_dev_build_path(
+            r"D:\CCAR-Copilot\src-tauri\TARGET\RELEASE\ccar-copilot.exe"
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_dev_build_path_normalizes_forward_slashes() {
+        assert!(is_dev_build_path(
+            "D:/CCAR-Copilot/src-tauri/target/debug/ccar-copilot.exe"
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_dev_build_path_accepts_installed_paths() {
+        assert!(!is_dev_build_path(
+            r"C:\Program Files\CCARCopilot\ccar-copilot.exe"
+        ));
+        assert!(!is_dev_build_path(
+            r"D:\Apps\CCARCopilot\ccar-copilot.exe"
+        ));
+        assert!(!is_dev_build_path(
+            r"C:\Users\wangh\AppData\Local\CCARCopilot\ccar-copilot.exe"
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_dev_build_path_does_not_match_partial_target_word() {
+        assert!(!is_dev_build_path(
+            r"C:\Program Files\TargetSoftware\app.exe"
+        ));
+        assert!(!is_dev_build_path(
+            r"D:\projects\my-target-debug-tool\app.exe"
+        ));
     }
 }

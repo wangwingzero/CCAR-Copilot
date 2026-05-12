@@ -5,9 +5,9 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, master, dev]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
 env:
   CARGO_TERM_COLOR: always
@@ -77,46 +77,11 @@ jobs:
         run: npm run test:unit
 
   # ============================================
-  # Python Sidecar 检查和测试
-  # ============================================
-  python-check:
-    name: Python Check
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: python
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
-      - name: Ruff format check
-        run: ruff format --check .
-
-      - name: Ruff lint
-        run: ruff check .
-
-      - name: Run tests
-        run: pytest tests -v
-
-      - name: Run property tests
-        run: pytest tests/property -v --hypothesis-show-statistics
-
-  # ============================================
   # Tauri 构建测试 (不发布)
   # ============================================
   build-test:
     name: Build Test
-    needs: [rust-check, frontend-check, python-check]
+    needs: [rust-check, frontend-check]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

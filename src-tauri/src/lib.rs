@@ -26,6 +26,7 @@ pub mod commands;
 pub mod crash_report;
 pub mod database;
 pub mod error;
+pub mod file_search;
 pub mod logging;
 pub mod ocr;
 pub mod regulation;
@@ -39,8 +40,10 @@ use tracing::{error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::crash_report::{setup_crash_handler, CrashReportConfig};
-use crate::database::settings::{init_config, get_config_path, save_config, get_cached_config, AppConfig};
-use crate::logging::{setup_logging_with_config, cleanup_old_logs, LogConfig};
+use crate::database::settings::{
+    get_cached_config, get_config_path, init_config, save_config, AppConfig,
+};
+use crate::logging::{cleanup_old_logs, setup_logging_with_config, LogConfig};
 use crate::regulation::RegulationIndexState;
 
 /// 运行 Tauri 应用
@@ -58,11 +61,7 @@ pub fn run() {
 
     let log_config = LogConfig {
         log_dir: log_dir.clone(),
-        level: if cfg!(debug_assertions) {
-            tracing::Level::DEBUG
-        } else {
-            tracing::Level::INFO
-        },
+        level: if cfg!(debug_assertions) { tracing::Level::DEBUG } else { tracing::Level::INFO },
         retention_days: logging::LOG_RETENTION_DAYS,
         console_output: cfg!(debug_assertions),
     };
@@ -95,10 +94,7 @@ pub fn run() {
             _log_guard = None;
 
             tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::from_default_env()
-                        .add_directive(tracing::Level::INFO.into()),
-                )
+                .with_env_filter(logging::build_log_filter(&log_config))
                 .init();
 
             let crash_config = CrashReportConfig {
@@ -119,8 +115,23 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             info!("Tauri 应用初始化中...");
+
+            // 将 openvino/ 子目录加入 DLL 搜索路径（安装版 DLL 在子目录中）
+            if let Ok(exe_path) = std::env::current_exe() {
+                if let Some(exe_dir) = exe_path.parent() {
+                    let openvino_dir = exe_dir.join("openvino");
+                    if openvino_dir.exists() {
+                        if let Ok(current_path) = std::env::var("PATH") {
+                            let new_path = format!("{};{}", openvino_dir.display(), current_path);
+                            unsafe { std::env::set_var("PATH", &new_path) };
+                            info!("OpenVINO DLL 搜索路径已配置: {}", openvino_dir.display());
+                        }
+                    }
+                }
+            }
 
             // 检查是否通过开机自启动以 --minimized 模式启动
             let start_minimized = std::env::args().any(|arg| arg == "--minimized");
@@ -130,7 +141,7 @@ pub fn run() {
 
             // 设置主窗口图标
             if let Some(window) = app.get_webview_window("main") {
-                let icon_data = include_bytes!("../icons/window-icon.png");
+                let icon_data = include_bytes!("../../resources/PNG/huge-ccar.png");
                 if let Ok(icon) = tauri::image::Image::from_bytes(icon_data) {
                     if let Err(e) = window.set_icon(icon) {
                         warn!("设置窗口图标失败: {}", e);
@@ -194,6 +205,14 @@ pub fn run() {
                 app.manage(batch_download_state);
 
                 info!("规章索引状态初始化成功");
+            }
+
+            // 初始化文件搜索索引
+            #[cfg(desktop)]
+            {
+                let file_search_state = commands::file_search_cmd::init_file_search_state();
+                app.manage(file_search_state);
+                info!("文件搜索索引初始化成功");
             }
 
             // 初始化系统托盘
@@ -275,13 +294,23 @@ pub fn run() {
             // 规章本地扫描命令
             regulation::regulation_scan_local_dir,
             regulation::regulation_scan_all_drives,
+            regulation::regulation_discover_local,
+            regulation::regulation_get_storage_path,
+            regulation::regulation_prepare_storage_dirs,
+            regulation::regulation_is_wifi_connected,
             // 规章同步对比命令
             regulation::regulation_sync_compare,
             regulation::regulation_sync_compare_online,
+            regulation::regulation_check_server_manifest,
+            regulation::regulation_full_sync_from_server,
             // 规章在线搜索命令
             regulation::regulation_online_search,
             regulation::regulation_fetch_all_online,
             regulation::regulation_download_single,
+            // 规章 AI 知识库导出/服务器同步
+            regulation::regulation_knowledge_export,
+            regulation::regulation_knowledge_sync_api,
+            regulation::regulation_knowledge_sync_server,
             // 规章旧数据迁移
             regulation::regulation_import_legacy_data,
             // 规章 OCR 处理命令
@@ -289,6 +318,15 @@ pub fn run() {
             regulation::regulation_ocr_update,
             regulation::regulation_get_ocr_queue,
             regulation::regulation_retry_failed_ocr,
+            regulation::regulation_requeue_local_ocr_for_mineru,
+            regulation::regulation_requeue_ocr_by_engine,
+            regulation::regulation_cleanup_invalid_files,
+            regulation::regulation_realign_pdf_filenames,
+            regulation::regulation_ocr_engine_stats,
+            // 文件搜索命令
+            commands::file_search_cmd::file_search,
+            commands::file_search_cmd::get_file_search_status,
+            commands::file_search_cmd::rebuild_file_search_index,
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用时出错");

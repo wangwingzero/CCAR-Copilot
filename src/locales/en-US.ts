@@ -7,7 +7,7 @@
 export default {
   // App general
   app: {
-    name: 'HuGe Screenshot',
+    name: 'CCAR Copilot',
     version: 'Version {version}',
   },
 
@@ -206,7 +206,9 @@ export default {
       softwareUpdate: 'Software Update Notification',
       softwareUpdateHelp: 'Show notification when new version is available',
     },
-    advanced: 'Advanced',
+    advanced: {
+      title: 'Advanced',
+    },
     account: {
       title: 'Account',
       login: 'Login',
@@ -233,7 +235,17 @@ export default {
       upgradeVip: 'Upgrade to VIP',
       manageDevices: 'Manage Devices',
     },
-    about: 'About',
+    about: {
+      title: 'About',
+      version: 'Version {version}',
+      description: 'Intelligent CAAC aviation regulation search and management tool with full-text search, PDF parsing, and OCR.',
+      license: 'License',
+      licenseText: 'This software is open-sourced under the MIT License. You are free to use, modify, and distribute it.',
+      thirdParty: 'Third-Party Acknowledgements',
+      links: 'Links',
+      reportIssue: 'Report Issue',
+      documentation: 'Documentation',
+    },
     
     // Settings groups
     group: {
@@ -355,6 +367,21 @@ export default {
       statusPendingRestart: 'Update downloaded, restart to apply',
       statusUpToDate: 'You are up to date',
       statusError: 'Failed to check for updates',
+      downloadAndInstall: 'Download and Install',
+      settings: 'Auto-Check & Proxy',
+      // Added in v0.1.6
+      retry: 'Retry',
+      skipThisVersion: 'Skip this version',
+      currentToNew: 'Current {current} → New {next}',
+      downloadSpeed: 'Speed',
+      downloadEta: 'ETA',
+      etaSeconds: '{n}s',
+      etaMinutes: '{n} min',
+      etaHours: '{n} h',
+      toastNewVersion: 'New version {version} available. Open Settings → Update to install',
+      toastDownloaded: '{version} downloaded. Click "Restart Now" to finish upgrade',
+      toastError: 'Update failed: {message}',
+      trayCheckUpdate: 'Check for Updates',
     },
 
     // File search settings
@@ -459,7 +486,7 @@ export default {
   // About
   about: {
     title: 'About',
-    description: 'High-performance Windows screenshot tool',
+    description: 'Intelligent CAAC aviation regulation search and management tool',
     author: 'Author',
     website: 'Website',
     license: 'License',

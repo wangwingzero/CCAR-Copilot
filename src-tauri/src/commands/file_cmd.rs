@@ -25,19 +25,15 @@ pub async fn save_text_file(path: String, content: String) -> Result<(), String>
     if let Some(parent) = file_path.parent() {
         if !parent.exists() {
             debug!("创建父目录: {:?}", parent);
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("创建目录失败: {}", e))?;
+            fs::create_dir_all(parent).await.map_err(|e| format!("创建目录失败: {}", e))?;
         }
     }
 
     // 写入文件
-    fs::write(&path, content.as_bytes())
-        .await
-        .map_err(|e| {
-            error!("写入文件失败: {} - {}", path, e);
-            format!("写入文件失败: {}", e)
-        })?;
+    fs::write(&path, content.as_bytes()).await.map_err(|e| {
+        error!("写入文件失败: {} - {}", path, e);
+        format!("写入文件失败: {}", e)
+    })?;
 
     info!("文件保存成功: {}", path);
     Ok(())
@@ -55,12 +51,10 @@ pub async fn save_text_file(path: String, content: String) -> Result<(), String>
 pub async fn read_text_file(path: String) -> Result<String, String> {
     debug!("读取文本文件: {}", path);
 
-    let content = fs::read_to_string(&path)
-        .await
-        .map_err(|e| {
-            error!("读取文件失败: {} - {}", path, e);
-            format!("读取文件失败: {}", e)
-        })?;
+    let content = fs::read_to_string(&path).await.map_err(|e| {
+        error!("读取文件失败: {} - {}", path, e);
+        format!("读取文件失败: {}", e)
+    })?;
 
     Ok(content)
 }

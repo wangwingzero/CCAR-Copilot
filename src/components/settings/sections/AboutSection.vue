@@ -25,7 +25,7 @@ import SettingsGroup from '@/components/settings/controls/SettingsGroup.vue'
 // ============================================
 
 /** Application name */
-const appName = '虎哥截图'
+const appName = 'CCAR Copilot'
 
 /** Application version - dynamically read from Tauri config */
 const appVersion = ref('...')
@@ -39,22 +39,24 @@ onMounted(async () => {
 })
 
 /** GitHub repository URL */
-const GITHUB_URL = 'https://github.com/hugescreenshot/hugescreenshot'
+const GITHUB_URL = 'https://github.com/wanghui5801/ccar-copilot'
 
 /** Issues URL */
-const ISSUES_URL = 'https://github.com/hugescreenshot/hugescreenshot/issues'
+const ISSUES_URL = 'https://github.com/wanghui5801/ccar-copilot/issues'
 
 /** Documentation URL */
-const DOCS_URL = 'https://github.com/hugescreenshot/hugescreenshot#readme'
+const DOCS_URL = 'https://github.com/wanghui5801/ccar-copilot#readme'
 
 /** Third-party libraries used */
 const thirdPartyLibs = [
   { name: 'Tauri', license: 'MIT/Apache-2.0' },
   { name: 'Vue.js', license: 'MIT' },
   { name: 'Pinia', license: 'MIT' },
+  { name: 'Tantivy', license: 'MIT' },
+  { name: 'jieba-rs', license: 'MIT' },
+  { name: 'OpenVINO', license: 'Apache-2.0' },
+  { name: 'PDFium', license: 'BSD-3-Clause' },
   { name: 'Lucide Icons', license: 'ISC' },
-  { name: 'fast-check', license: 'MIT' },
-  { name: 'RapidOCR', license: 'Apache-2.0' },
 ]
 
 // ============================================
@@ -117,8 +119,8 @@ async function openDocs(): Promise<void> {
       <!-- Logo and App Name -->
       <div class="app-header">
         <img
-          src="/resources/PNG/虎哥截图.png"
-          alt="虎哥截图"
+          src="/resources/PNG/ccar-copilot.png"
+          alt="CCAR Copilot"
           class="app-logo"
           @error="handleLogoError"
         />

@@ -70,6 +70,7 @@ const settingsGroups = computed<SettingsGroup[]>(() => [
     items: [
       { id: 'notification', icon: 'bell', labelKey: 'settings.notification.title' },
       { id: 'update', icon: 'refresh-cw', labelKey: 'settings.update.title' },
+      { id: 'advanced', icon: 'sliders', labelKey: 'settings.advanced.title' },
       { id: 'about', icon: 'info', labelKey: 'settings.about.title' },
     ]
   },
@@ -117,12 +118,16 @@ function handleItemClick(categoryId: string): void {
           </li>
         </ul>
       </template>
+    </div>
+  </nav>
+</template>
 
 <style scoped>
 .settings-sidebar {
   width: var(--sidebar-width, 200px);
   min-width: var(--sidebar-width, 200px);
   height: 100%;
+  flex-shrink: 0;
   background: var(--bg-primary);
   border-right: 1px solid var(--border-color);
   overflow-y: auto;
@@ -232,5 +237,46 @@ function handleItemClick(categoryId: string): void {
 
 .settings-sidebar::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
+}
+
+@media (max-width: 640px) {
+  .settings-sidebar {
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    max-height: 116px;
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .sidebar-content {
+    display: flex;
+    gap: 10px;
+    min-width: max-content;
+    padding: 10px 12px;
+  }
+
+  .group-header {
+    display: none;
+  }
+
+  .menu-list {
+    display: flex;
+    gap: 6px;
+  }
+
+  .menu-item {
+    width: auto;
+    min-height: 36px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    white-space: nowrap;
+  }
+
+  .menu-label {
+    overflow: visible;
+  }
 }
 </style>

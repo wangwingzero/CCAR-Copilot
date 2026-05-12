@@ -7,7 +7,7 @@
  * - 系统设置：通知、更新、关于
  */
 
-import { ref, reactive, onMounted, watch } from 'vue'
+import { ref, reactive, onMounted, watch, toRaw } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useTheme } from '@/composables/useTheme'
 import { useLocale } from '@/composables/useLocale'
@@ -16,6 +16,7 @@ import { DEFAULT_CONFIG } from '@/types'
 import SettingsSidebar from './SettingsSidebar.vue'
 import NotificationSection from './sections/NotificationSection.vue'
 import UpdateSection from './sections/UpdateSection.vue'
+import AdvancedSection from './sections/AdvancedSection.vue'
 import AboutSection from './sections/AboutSection.vue'
 
 // ============================================
@@ -62,7 +63,7 @@ onMounted(async () => {
 watch(
   () => settingsStore.config,
   (newConfig) => {
-    Object.assign(localConfig, structuredClone(newConfig))
+    Object.assign(localConfig, structuredClone(toRaw(newConfig)))
   },
   { deep: true }
 )
@@ -74,10 +75,11 @@ watch(
 async function loadSettings(): Promise<void> {
   try {
     await settingsStore.loadConfig()
-    Object.assign(localConfig, structuredClone(settingsStore.config))
+    Object.assign(localConfig, structuredClone(toRaw(settingsStore.config)))
   } catch (error) {
     console.error('Failed to load settings:', error)
-    showSettingsToast('加载设置失败，使用默认配置')
+    const detail = error instanceof Error ? error.message : String(error)
+    showSettingsToast(`加载设置失败，使用默认配置: ${detail}`)
   }
 }
 
@@ -205,6 +207,11 @@ async function handleAutoStartChange(): Promise<void> {
           <UpdateSection />
         </div>
 
+        <!-- 高级设置 -->
+        <div v-show="activeCategory === 'advanced'" class="settings-section">
+          <AdvancedSection />
+        </div>
+
         <!-- 关于 -->
         <div v-show="activeCategory === 'about'" class="settings-section">
           <AboutSection />
@@ -266,14 +273,17 @@ async function handleAutoStartChange(): Promise<void> {
   --accent-primary: var(--color-accent);
   --accent-hover: var(--color-accent-hover);
   --border-color: var(--color-border);
-  --sidebar-width: 200px;
+  --sidebar-width: 220px;
   --content-padding: 24px;
+  --group-gap: 20px;
 }
 
 .settings-panel {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 13px;
@@ -283,7 +293,8 @@ async function handleAutoStartChange(): Promise<void> {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
+  min-height: 58px;
+  padding: 12px 58px 12px 20px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
@@ -330,18 +341,22 @@ async function handleAutoStartChange(): Promise<void> {
 .panel-body {
   display: flex;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 
 .settings-content {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
-  padding: var(--content-padding);
+  padding: 28px 32px 56px;
   background: var(--bg-secondary);
+  overscroll-behavior: contain;
 }
 
 .settings-section {
-  max-width: 600px;
+  width: min(860px, 100%);
+  max-width: none;
 }
 
 .section-title {
@@ -428,7 +443,10 @@ async function handleAutoStartChange(): Promise<void> {
 }
 
 .panel-footer {
-  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 20px;
   background: var(--bg-secondary);
   border-top: 1px solid var(--border-color);
   font-size: 11px;
@@ -567,5 +585,41 @@ async function handleAutoStartChange(): Promise<void> {
 .toast-leave-to {
   opacity: 0;
   transform: translateX(-50%) translateY(8px);
+}
+
+@media (max-width: 900px) {
+  .settings-panel {
+    --sidebar-width: 180px;
+    --content-padding: 20px;
+  }
+
+  .settings-content {
+    padding: 24px 24px 52px;
+  }
+
+  .settings-section {
+    width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .panel-header {
+    min-height: 54px;
+    padding: 10px 52px 10px 16px;
+  }
+
+  .panel-body {
+    flex-direction: column;
+  }
+
+  .settings-content {
+    padding: 20px 16px 48px;
+  }
+
+  .setting-item {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
 }
 </style>

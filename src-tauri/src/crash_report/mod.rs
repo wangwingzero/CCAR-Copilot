@@ -159,7 +159,7 @@ impl CrashReport {
     /// 从 panic 信息创建崩溃报告
     pub fn from_panic(panic_info: &PanicHookInfo<'_>, config: &CrashReportConfig) -> Self {
         let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-        
+
         // 获取错误消息
         let error_message = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
             s.to_string()
@@ -170,9 +170,9 @@ impl CrashReport {
         };
 
         // 获取错误位置
-        let error_location = panic_info.location().map(|loc| {
-            format!("{}:{}:{}", loc.file(), loc.line(), loc.column())
-        });
+        let error_location = panic_info
+            .location()
+            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()));
 
         // 捕获堆栈跟踪
         let backtrace = Backtrace::force_capture().to_string();
@@ -196,7 +196,8 @@ impl CrashReport {
         let separator = "=".repeat(80);
         let sub_separator = "-".repeat(40);
 
-        let location_str = self.error_location
+        let location_str = self
+            .error_location
             .as_ref()
             .map(|loc| format!("错误位置: {}\n", loc))
             .unwrap_or_default();
@@ -465,10 +466,7 @@ fn show_windows_error_dialog(title: &str, message: &str) {
 
     // 转换为宽字符串
     fn to_wide(s: &str) -> Vec<u16> {
-        OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
     }
 
     let title_wide = to_wide(title);
@@ -532,7 +530,7 @@ pub fn generate_crash_report(
     report_dir: &Path,
 ) -> Result<PathBuf, std::io::Error> {
     let config = CRASH_CONFIG.get().cloned().unwrap_or_default();
-    
+
     let report = CrashReport {
         timestamp: Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
         app_name: config.app_name,
@@ -615,7 +613,7 @@ mod tests {
     #[test]
     fn test_crash_report_save_to_file() {
         let temp_dir = tempdir().unwrap();
-        
+
         let report = CrashReport {
             timestamp: "2024-01-01 12:00:00.000".to_string(),
             app_name: "测试应用".to_string(),
@@ -628,7 +626,7 @@ mod tests {
 
         let path = report.save_to_file(temp_dir.path()).unwrap();
         assert!(path.exists());
-        
+
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("测试应用"));
         assert!(content.contains("测试错误"));
@@ -661,10 +659,10 @@ mod tests {
     #[test]
     fn test_generate_crash_report() {
         let temp_dir = tempdir().unwrap();
-        
+
         let path = generate_crash_report("手动触发的错误", temp_dir.path()).unwrap();
         assert!(path.exists());
-        
+
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("手动触发的错误"));
     }

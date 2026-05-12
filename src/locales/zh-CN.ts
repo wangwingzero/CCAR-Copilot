@@ -7,7 +7,7 @@
 export default {
   // 应用通用
   app: {
-    name: '虎哥截图',
+    name: 'CCAR Copilot',
     version: '版本 {version}',
   },
 
@@ -255,7 +255,7 @@ export default {
     about: {
       title: '关于',
       version: '版本 {version}',
-      description: '高性能 Windows 桌面截图工具，支持区域截图、OCR 识别、贴图、录屏等功能。',
+      description: 'CAAC 民航规章智能检索与管理工具，支持全文搜索、PDF 解析、OCR 识别等功能。',
       license: '许可证',
       licenseText: '本软件基于 MIT 许可证开源，您可以自由使用、修改和分发。',
       thirdParty: '第三方致谢',
@@ -384,6 +384,21 @@ export default {
       statusPendingRestart: '更新已下载，重启后生效',
       statusUpToDate: '已是最新版本',
       statusError: '检查更新失败',
+      downloadAndInstall: '下载并安装',
+      settings: '自动检查与代理',
+      // v0.1.6 新增
+      retry: '重试',
+      skipThisVersion: '跳过此版本',
+      currentToNew: '当前 {current} → 新版 {next}',
+      downloadSpeed: '速度',
+      downloadEta: '剩余',
+      etaSeconds: '{n} 秒',
+      etaMinutes: '{n} 分钟',
+      etaHours: '{n} 小时',
+      toastNewVersion: '发现新版本 {version}，进入「设置 → 更新」下载安装',
+      toastDownloaded: '{version} 已下载完成，点「立即重启」完成升级',
+      toastError: '更新失败：{message}',
+      trayCheckUpdate: '检查更新',
     },
 
     // 文件搜索设置
@@ -488,7 +503,7 @@ export default {
   // 关于
   about: {
     title: '关于',
-    description: '高性能 Windows 桌面截图工具',
+    description: 'CAAC 民航规章智能检索与管理工具',
     author: '作者',
     website: '官网',
     license: '许可证',
