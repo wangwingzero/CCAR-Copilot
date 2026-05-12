@@ -20,8 +20,31 @@
  * - 19.6: 用户可以在设置中禁用自动更新
  */
 
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import type { Composer } from 'vue-i18n'
+import { i18n } from '@/locales'
+import { useToast } from '@/composables/useToast'
+import { useSettingsStore } from '@/stores/settings'
+
+/** 翻译 helper(不依赖 setup scope, 可在模块级 watch / event handler 里用) */
+function tr(key: string, named?: Record<string, unknown>): string {
+  const composer = i18n.global as unknown as Composer
+  return named ? composer.t(key, named) : composer.t(key)
+}
+
+/** 模块级 toast 句柄(useToast 内部是单例,任何位置 import 都是同一份 state) */
+const { showToast } = useToast()
+
+/** 延迟拿 Pinia store 引用(避免模块加载时 Pinia 还没初始化) */
+let _settingsStore: ReturnType<typeof useSettingsStore> | null = null
+function getSettingsStore() {
+  if (!_settingsStore) {
+    _settingsStore = useSettingsStore()
+  }
+  return _settingsStore
+}
 
 /**
  * 更新信息
@@ -108,30 +131,102 @@ export interface RustUpdateConfig {
  * </script>
  * ```
  */
+// ============================================
+// 模块级单例状态(跨组件 mount/unmount 持久)
+// ============================================
+//
+// 为什么状态要提到模块顶层而不是 useUpdate() 内部:
+//
+// SettingsPanel 在 App.vue 用 `v-if="showSettings"` 包裹,关闭设置面板会真正
+// 卸载 SettingsPanel 子树(含 UpdateSection)。如果状态放在 useUpdate() 内部
+// 局部 ref,每次重新打开设置面板都会从 Idle 开始,导致:
+//
+//   1. 用户点「下载并安装」开始下载 (status=Downloading)
+//   2. 因为 CDN 慢或者其他原因用户关掉设置面板等等
+//   3. 重新打开设置面板 -> UpdateSection 重新 mount -> useUpdate() 重置 ->
+//      status 回到 Idle -> 「下载并安装」按钮消失、进度条消失,什么都看不见
+//   4. 但 Rust 端的 download_and_install_update 还在后台慢慢跑
+//   5. 进度事件继续推送但前端 listener 已经被 onUnmounted 解除了 -> 状态再也
+//      更新不了
+//
+// 把状态提到模块级 + listeners 永不卸载,UpdateSection 重新挂载后能立即看到
+// 当前真实的下载进度。
+const status = ref<UpdateStatus>({ status: 'Idle' })
+const currentVersion = ref<string>('')
+const config = ref<RustUpdateConfig>({
+  auto_update_enabled: true,
+  check_interval_hours: 24,
+  check_on_startup: true,
+  auto_download: true,
+  auto_install: false,
+})
+const isLoading = ref(false)
+const error = ref<string | null>(null)
+
+// 下载字节累计与总大小(供 UI 展示)
+const downloadedBytes = ref(0)
+const totalBytes = ref<number | null>(null)
+
+// 下载速度(B/s) 采用 EMA 平滑,避免瞬时数据抖动
+const downloadSpeed = ref(0)
+let lastBytesSampled = 0
+let lastBytesSampledAt = 0
+
+// 上次失败的动作(供「重试」按钮使用)
+let lastFailedAction: 'check' | 'download' | null = null
+
+// 单例资源,初始化一次后不释放,直到应用退出
+let checkInterval: ReturnType<typeof setInterval> | null = null
+const unlisteners: UnlistenFn[] = []
+let initPromise: Promise<void> | null = null
+
+// 计算属性
+const isUpdateAvailable = computed(() => status.value.status === 'Available')
+const isPendingRestart = computed(() => status.value.status === 'PendingRestart')
+const isChecking = computed(() => status.value.status === 'Checking')
+const isDownloading = computed(() => status.value.status === 'Downloading')
+const updateInfo = computed(() => status.value.info)
+const downloadProgress = computed(() => {
+  if (totalBytes.value && totalBytes.value > 0) {
+    return Math.min(100, (downloadedBytes.value / totalBytes.value) * 100)
+  }
+  return status.value.progress ?? 0
+})
+
+/** 剩余秒数,无法估计时返回 null */
+const downloadEtaSeconds = computed<number | null>(() => {
+  if (!totalBytes.value || downloadSpeed.value <= 0) return null
+  const remaining = totalBytes.value - downloadedBytes.value
+  if (remaining <= 0) return 0
+  return Math.ceil(remaining / downloadSpeed.value)
+})
+
+// ============================================
+// 状态变化时弹 Toast(模块级 watch,永久生效)
+// ============================================
+//
+// 用户不一定停在「设置 -> 更新」面板,所以重要状态变化(发现新版本 / 下载完成 /
+// 出错)主动弹 toast 提示。这是 v0.1.6 的关键 UX 改进。
+watch(
+  () => status.value.status,
+  (newStatus, prevStatus) => {
+    if (newStatus === prevStatus) return
+    if (newStatus === 'Available') {
+      const v = updateInfo.value?.version ?? ''
+      showToast(tr('settings.update.toastNewVersion', { version: v }), 'info', 6000)
+    }
+    else if (newStatus === 'PendingRestart') {
+      const v = updateInfo.value?.version ?? ''
+      showToast(tr('settings.update.toastDownloaded', { version: v }), 'success', 6000)
+    }
+    else if (newStatus === 'Error') {
+      const msg = status.value.message ?? error.value ?? ''
+      showToast(tr('settings.update.toastError', { message: msg }), 'error', 6000)
+    }
+  }
+)
+
 export function useUpdate() {
-  // 状态
-  const status = ref<UpdateStatus>({ status: 'Idle' })
-  const currentVersion = ref<string>('')
-  const config = ref<RustUpdateConfig>({
-    auto_update_enabled: true,
-    check_interval_hours: 24,
-    check_on_startup: true,
-    auto_download: true,
-    auto_install: false,
-  })
-  const isLoading = ref(false)
-  const error = ref<string | null>(null)
-
-  // 定时检查更新的定时器
-  let checkInterval: ReturnType<typeof setInterval> | null = null
-
-  // 计算属性
-  const isUpdateAvailable = computed(() => status.value.status === 'Available')
-  const isPendingRestart = computed(() => status.value.status === 'PendingRestart')
-  const isChecking = computed(() => status.value.status === 'Checking')
-  const isDownloading = computed(() => status.value.status === 'Downloading')
-  const updateInfo = computed(() => status.value.info)
-  const downloadProgress = computed(() => status.value.progress ?? 0)
 
   /**
    * 获取当前版本
@@ -193,23 +288,32 @@ export function useUpdate() {
 
     try {
       const result = await invoke<UpdateStatus>('check_for_update')
-      status.value = result
 
-      // 如果有更新且配置了自动下载，则自动开始下载
-      if (result.status === 'Available' && config.value.auto_download) {
-        // 延迟一下再开始下载，让用户看到更新可用的状态
-        setTimeout(() => {
-          downloadAndInstall().catch((e) => {
-            console.error('自动下载更新失败:', e)
-          })
-        }, 1000)
+      // 用户跳过的版本不再显示「发现新版本」卡片,视觉上当成 UpToDate 处理
+      if (result.status === 'Available' && result.info) {
+        const skipped = getSettingsStore().update.skipVersion
+        if (skipped && skipped === result.info.version) {
+          console.info('[useUpdate] 跳过用户已忽略的版本:', skipped)
+          status.value = { status: 'UpToDate' }
+          lastFailedAction = null
+          return status.value
+        }
       }
+
+      status.value = result
+      lastFailedAction = null
+
+      // 注意：不在这里自动触发下载。用户在「设置 → 更新」里看到「下载并安装」按钮
+      // 后主动点击才开始下载，期间显示进度条；完成后再由用户主动点击「立即重启」
+      // 完成升级。auto_download/auto_install 配置仍保留供未来扩展（例如静默后台
+      // 更新模式），当前 UI 流程一律要求用户确认。
 
       return result
     } catch (e) {
       console.error('检查更新失败:', e)
       error.value = String(e)
       status.value = { status: 'Error', message: String(e) }
+      lastFailedAction = 'check'
       return status.value
     } finally {
       isLoading.value = false
@@ -224,26 +328,27 @@ export function useUpdate() {
   async function downloadAndInstall(): Promise<UpdateStatus> {
     isLoading.value = true
     error.value = null
+    downloadedBytes.value = 0
+    totalBytes.value = null
+    downloadSpeed.value = 0
+    lastBytesSampled = 0
+    lastBytesSampledAt = 0
     status.value = { status: 'Downloading', progress: 0 }
 
     try {
       const result = await invoke<UpdateStatus>('download_and_install_update')
       status.value = result
+      lastFailedAction = null
 
-      // 如果配置了自动安装且更新已准备好，则自动重启
-      if (result.status === 'PendingRestart' && config.value.auto_install) {
-        setTimeout(() => {
-          restartApp().catch((e) => {
-            console.error('自动重启失败:', e)
-          })
-        }, 3000)
-      }
+      // 注意：不在这里自动触发重启。下载并安装完成后状态切到 PendingRestart，
+      // UI 显示「立即重启」按钮，由用户主动点击调用 restartApp() 完成升级。
 
       return result
     } catch (e) {
       console.error('下载更新失败:', e)
       error.value = String(e)
       status.value = { status: 'Error', message: String(e) }
+      lastFailedAction = 'download'
       return status.value
     } finally {
       isLoading.value = false
@@ -265,10 +370,42 @@ export function useUpdate() {
   }
 
   /**
-   * 忽略当前更新
+   * 忽略当前更新(仅清状态,不持久化)
    */
   function dismissUpdate(): void {
     status.value = { status: 'Idle' }
+  }
+
+  /**
+   * 跳过当前发现的版本(持久化到 settings.update.skipVersion)
+   *
+   * 下次 checkForUpdate 即使后端返回这个版本,也不会再显示「发现新版本」卡片
+   * 和 toast 通知,直到有更高版本发布。
+   */
+  function skipCurrentVersion(): void {
+    const v = updateInfo.value?.version
+    if (v) {
+      getSettingsStore().updateUpdate({ skipVersion: v })
+      console.info('[useUpdate] 用户跳过版本:', v)
+    }
+    status.value = { status: 'Idle' }
+  }
+
+  /**
+   * 重试上次失败的动作
+   *
+   * - 上次失败是 check  -> 重新 checkForUpdate
+   * - 上次失败是 download -> 重新 downloadAndInstall
+   * - 未知失败          -> 默认重新 check
+   */
+  async function retryLastAction(): Promise<void> {
+    const action = lastFailedAction
+    error.value = null
+    if (action === 'download') {
+      await downloadAndInstall()
+    } else {
+      await checkForUpdate()
+    }
   }
 
   /**
@@ -291,34 +428,108 @@ export function useUpdate() {
   }
 
   /**
-   * 初始化
+   * 注册 Rust 侧推送的下载事件监听
+   *
+   * - `update://download-started`  一次,带 totalSize(可能为 null,服务器未返回 Content-Length)
+   * - `update://download-progress` 多次,带累计 downloaded + total
+   * - `update://download-finished` 一次,下载完成准备安装
    */
-  async function initialize(): Promise<void> {
-    await fetchCurrentVersion()
-    await fetchConfig()
-
-    // 设置自动检查
-    setupAutoCheck()
-
-    // 如果配置了启动时检查，则检查更新
-    if (config.value.check_on_startup && config.value.auto_update_enabled) {
-      // 延迟几秒再检查，避免影响启动速度
-      setTimeout(() => {
-        checkForUpdate()
-      }, 5000)
+  async function setupEventListeners(): Promise<void> {
+    // Tauri IPC 未注入(例如 Vitest/jsdom、浏览器开发预览)时 listen 会抛出
+    // "Cannot read properties of undefined (reading 'transformCallback')".
+    // 这里吞掉错误,保证 composable 在单测中也能被安全 mount。
+    try {
+      const started = await listen<{ totalSize: number | null }>(
+        'update://download-started',
+        (event) => {
+          totalBytes.value = event.payload.totalSize
+          downloadedBytes.value = 0
+          downloadSpeed.value = 0
+          lastBytesSampled = 0
+          lastBytesSampledAt = Date.now()
+        }
+      )
+      const progress = await listen<{ downloaded: number; total: number | null }>(
+        'update://download-progress',
+        (event) => {
+          downloadedBytes.value = event.payload.downloaded
+          if (event.payload.total !== null) {
+            totalBytes.value = event.payload.total
+          }
+          // EMA 平滑的下载速度: 每隔 >= 250ms 采样一次,避免短间隔抖动
+          const now = Date.now()
+          if (lastBytesSampledAt > 0) {
+            const dt = (now - lastBytesSampledAt) / 1000
+            if (dt >= 0.25) {
+              const instant = (downloadedBytes.value - lastBytesSampled) / dt
+              if (instant >= 0) {
+                downloadSpeed.value = downloadSpeed.value > 0
+                  ? 0.7 * downloadSpeed.value + 0.3 * instant
+                  : instant
+              }
+              lastBytesSampled = downloadedBytes.value
+              lastBytesSampledAt = now
+            }
+          } else {
+            lastBytesSampled = downloadedBytes.value
+            lastBytesSampledAt = now
+          }
+        }
+      )
+      const finished = await listen('update://download-finished', () => {
+        // 下载完成后立即将字节拉满,避免进度条停在 99%
+        if (totalBytes.value) {
+          downloadedBytes.value = totalBytes.value
+        }
+      })
+      // 托盘菜单「检查更新」入口: Rust 端 emit 'tray-check-update' 时静默触发
+      // 一次检查; 若发现新版本,上面 watch(status) 会弹 toast 引导用户进设置
+      const trayCheck = await listen('tray-check-update', () => {
+        console.info('[useUpdate] 收到托盘「检查更新」事件')
+        void checkForUpdate()
+      })
+      unlisteners.push(started, progress, finished, trayCheck)
+    } catch (e) {
+      console.warn('注册更新事件监听失败(非 Tauri 环境?):', e)
     }
   }
 
-  // 生命周期
-  onMounted(() => {
-    initialize()
-  })
-
-  onUnmounted(() => {
-    if (checkInterval) {
-      clearInterval(checkInterval)
-      checkInterval = null
+  /**
+   * 初始化(模块级单例 + Promise 去重)
+   *
+   * 多个组件同时挂载时只会跑一次真正的 fetch + setup,后来者直接复用同一个
+   * Promise。应用整个生命周期内不再卸载 listeners,保证 Rust 推送的进度事件
+   * 始终能被前端收到,即使 SettingsPanel 在下载过程中被关闭。
+   */
+  function initialize(): Promise<void> {
+    if (initPromise) {
+      return initPromise
     }
+    initPromise = (async () => {
+      await fetchCurrentVersion()
+      await fetchConfig()
+      await setupEventListeners()
+      setupAutoCheck()
+
+      // 如果配置了启动时检查,延迟几秒再检查,避免影响启动速度
+      if (config.value.check_on_startup && config.value.auto_update_enabled) {
+        setTimeout(() => {
+          void checkForUpdate()
+        }, 5000)
+      }
+    })().catch((e) => {
+      console.error('useUpdate 初始化失败:', e)
+      // 失败时重置 Promise,允许下次重试
+      initPromise = null
+      throw e
+    })
+    return initPromise
+  }
+
+  // 生命周期: 仅触发一次性初始化。不在 onUnmounted 释放 listeners/interval,
+  // 让模块级状态在多次 mount/unmount 间持续有效。
+  onMounted(() => {
+    void initialize()
   })
 
   return {
@@ -328,6 +539,9 @@ export function useUpdate() {
     config,
     isLoading,
     error,
+    downloadedBytes,
+    totalBytes,
+    downloadSpeed,
 
     // 计算属性
     isUpdateAvailable,
@@ -336,12 +550,15 @@ export function useUpdate() {
     isDownloading,
     updateInfo,
     downloadProgress,
+    downloadEtaSeconds,
 
     // 方法
     checkForUpdate,
     downloadAndInstall,
     restartApp,
     dismissUpdate,
+    skipCurrentVersion,
+    retryLastAction,
     saveConfig,
     fetchConfig,
     fetchCurrentVersion,

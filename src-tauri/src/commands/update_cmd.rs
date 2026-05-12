@@ -1,26 +1,35 @@
 //! 自动更新命令模块
 //!
-//! 本模块提供自动更新相关的 Tauri 命令。
+//! 本模块提供自动更新相关的 Tauri 命令,使用 `tauri-plugin-updater` 与
+//! `ccar-update.031986.xyz` 上托管的 `latest.json` 交互。
 //!
 //! # 功能
 //!
-//! - 检查更新
-//! - 下载并安装更新
-//! - 获取更新状态
-//! - 获取/设置自动更新配置
+//! - 检查更新(支持用户代理前缀)
+//! - 下载并安装更新,实时推送进度事件
+//! - 查询/保存前端使用的自动更新配置
+//! - 获取当前版本、重启应用
+//!
+//! # 事件
+//!
+//! 下载过程中向 webview 发送以下事件:
+//!
+//! - `update://download-started`  `{ totalSize: number | null }`
+//! - `update://download-progress` `{ downloaded: number, total: number | null }`
+//! - `update://download-finished` `{}`
 //!
 //! # Requirements
 //!
 //! - 19.1: 启动时和定期检查更新
 //! - 19.2: 更新可用时通知用户并显示发布说明
 //! - 19.3: 后台下载和安装更新
-//! - 19.4: 更新失败时回滚到上一版本
-//! - 19.5: 支持增量更新以减少下载大小
+//! - 19.4: 更新失败时返回错误
 //! - 19.6: 用户可以在设置中禁用自动更新
 
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
-use tracing::info;
+use tauri::{AppHandle, Emitter};
+use tauri_plugin_updater::UpdaterExt;
+use tracing::{info, warn};
 
 /// 更新信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,46 +95,128 @@ impl Default for UpdateConfig {
     }
 }
 
-/// 检查更新
+/// 根据当前配置构造一个 `Updater` 实例,在 `use_proxy = true` 且 `proxy_url`
+/// 可解析时套上 HTTP 代理;否则使用默认的系统 TLS 直连。
 ///
-/// 注意：此功能需要配置 tauri-plugin-updater 并设置有效的更新端点。
-/// 当前实现返回"已是最新版本"状态，实际更新检查将在配置更新服务器后启用。
+/// 失败时返回字符串错误,便于直接返回给前端。
+fn build_updater(
+    app: &AppHandle,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    use crate::database::settings::{get_config_path, load_config};
+
+    let config_path = get_config_path(app).map_err(|e| e.to_string())?;
+    let app_config = load_config(&config_path).map_err(|e| e.to_string())?;
+
+    let mut builder = app.updater_builder();
+    if app_config.update.use_proxy && !app_config.update.proxy_url.trim().is_empty() {
+        match app_config.update.proxy_url.parse::<url::Url>() {
+            Ok(url) => {
+                info!("updater 使用代理: {}", url);
+                builder = builder.proxy(url);
+            }
+            Err(e) => {
+                warn!(
+                    "代理 URL 无法解析,已忽略代理直接走默认通道: {} (err={})",
+                    app_config.update.proxy_url, e
+                );
+            }
+        }
+    }
+
+    builder.build().map_err(|e| format!("构造 updater 失败: {}", e))
+}
+
+/// 检查更新
 ///
 /// # Requirements
 /// - 19.1: 检查更新
 /// - 19.2: 返回更新信息和发布说明
 #[tauri::command]
-pub async fn check_for_update(_app: AppHandle) -> Result<UpdateStatus, String> {
+pub async fn check_for_update(app: AppHandle) -> Result<UpdateStatus, String> {
     info!("检查更新...");
-    
-    // 注意：tauri-plugin-updater 需要在 tauri.conf.json 中配置有效的更新端点和公钥
-    // 当前返回"已是最新版本"状态，实际更新检查将在配置更新服务器后启用
-    //
-    // 要启用实际更新检查：
-    // 1. 在 tauri.conf.json 中配置 plugins.updater.endpoints 为实际的更新服务器 URL
-    // 2. 使用 `npx tauri signer generate -w ~/.tauri/hugescreenshot.key` 生成密钥对
-    // 3. 将公钥添加到 tauri.conf.json 的 plugins.updater.pubkey
-    // 4. 在更新服务器上托管签名的更新包
-    
-    info!("更新检查完成：当前已是最新版本（更新服务器未配置）");
-    Ok(UpdateStatus::UpToDate)
+
+    let updater = build_updater(&app)?;
+    match updater.check().await {
+        Ok(Some(update)) => {
+            info!(
+                "发现新版本 {} (当前 {})",
+                update.version, update.current_version
+            );
+            Ok(UpdateStatus::Available {
+                info: UpdateInfo {
+                    version: update.version.clone(),
+                    notes: update.body.clone(),
+                    date: update.date.map(|d| d.to_string()),
+                    download_size: None,
+                },
+            })
+        }
+        Ok(None) => {
+            info!("已是最新版本");
+            Ok(UpdateStatus::UpToDate)
+        }
+        Err(e) => {
+            warn!("检查更新失败: {}", e);
+            Err(format!("检查更新失败: {}", e))
+        }
+    }
 }
 
 /// 下载并安装更新
 ///
-/// 注意：此功能需要配置 tauri-plugin-updater 并设置有效的更新端点。
+/// 下载过程中会向前端推送 `update://download-*` 事件,安装完成后返回
+/// `PendingRestart`,由用户点击确认后调用 `restart_app` 重启完成升级。
 ///
 /// # Requirements
 /// - 19.3: 后台下载和安装更新
-/// - 19.4: 更新失败时返回错误（回滚由服务器端处理）
 #[tauri::command]
-pub async fn download_and_install_update(_app: AppHandle) -> Result<UpdateStatus, String> {
+pub async fn download_and_install_update(app: AppHandle) -> Result<UpdateStatus, String> {
     info!("下载并安装更新...");
-    
-    // 当前返回错误状态，实际下载安装将在配置更新服务器后启用
-    Ok(UpdateStatus::Error {
-        message: "更新服务器未配置，无法下载更新".to_string(),
-    })
+
+    let updater = build_updater(&app)?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| format!("检查更新失败: {}", e))?
+        .ok_or_else(|| "没有可用更新".to_string())?;
+
+    let app_for_progress = app.clone();
+    let app_for_finish = app.clone();
+    let mut emitted_start = false;
+    let mut downloaded: u64 = 0;
+
+    update
+        .download_and_install(
+            move |chunk_length, content_length| {
+                downloaded = downloaded.saturating_add(chunk_length as u64);
+                if !emitted_start {
+                    emitted_start = true;
+                    let _ = app_for_progress.emit(
+                        "update://download-started",
+                        serde_json::json!({ "totalSize": content_length }),
+                    );
+                }
+                let _ = app_for_progress.emit(
+                    "update://download-progress",
+                    serde_json::json!({
+                        "downloaded": downloaded,
+                        "total": content_length,
+                    }),
+                );
+            },
+            move || {
+                info!("更新包下载完成,开始安装...");
+                let _ = app_for_finish.emit("update://download-finished", ());
+            },
+        )
+        .await
+        .map_err(|e| {
+            warn!("下载或安装更新失败: {}", e);
+            format!("下载或安装更新失败: {}", e)
+        })?;
+
+    info!("更新安装完成,等待重启");
+    Ok(UpdateStatus::PendingRestart)
 }
 
 /// 重启应用以完成更新
@@ -135,14 +226,14 @@ pub async fn download_and_install_update(_app: AppHandle) -> Result<UpdateStatus
 #[tauri::command]
 pub async fn restart_app() -> Result<(), String> {
     info!("重启应用以完成更新...");
-    
+
     // 使用 tauri 的退出功能，应用将在退出后由系统重新启动（如果配置了自动重启）
     // 或者用户可以手动重新启动应用
     tauri::async_runtime::spawn(async {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         std::process::exit(0);
     });
-    
+
     Ok(())
 }
 

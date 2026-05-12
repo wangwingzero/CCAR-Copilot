@@ -12,7 +12,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime, Wry,
+    AppHandle, Emitter, Manager, Runtime, Wry,
 };
 use tracing::{error, info, warn};
 
@@ -48,9 +48,7 @@ impl Default for TrayStateManager {
 
 impl TrayStateManager {
     pub fn new() -> Self {
-        Self {
-            state: AtomicU8::new(TrayState::Idle as u8),
-        }
+        Self { state: AtomicU8::new(TrayState::Idle as u8) }
     }
 
     pub fn get_state(&self) -> TrayState {
@@ -68,22 +66,37 @@ pub const TRAY_ID: &str = "main-tray";
 /// 菜单项 ID
 pub mod menu_ids {
     pub const SHOW_WINDOW: &str = "show_window";
+    pub const SETTINGS: &str = "settings";
+    pub const CHECK_UPDATE: &str = "check_update";
     pub const EXIT: &str = "exit";
 }
 
 /// 创建托盘菜单
 fn create_tray_menu<R: Runtime>(app: &AppHandle<R>) -> Result<Menu<R>, String> {
-    let show_window_item = MenuItem::with_id(app, menu_ids::SHOW_WINDOW, "显示主窗口", true, None::<&str>)
-        .map_err(|e| format!("创建显示窗口菜单项失败: {}", e))?;
+    let show_window_item =
+        MenuItem::with_id(app, menu_ids::SHOW_WINDOW, "显示主窗口", true, None::<&str>)
+            .map_err(|e| format!("创建显示窗口菜单项失败: {}", e))?;
+
+    let settings_item = MenuItem::with_id(app, menu_ids::SETTINGS, "设置", true, None::<&str>)
+        .map_err(|e| format!("创建设置菜单项失败: {}", e))?;
+
+    // v0.1.6 新增: 一键检查更新。点击后 Rust emit `tray-check-update` 事件,
+    // 前端 `useUpdate.ts` 设置了监听器会静默触发一次检查;若发现新版本
+    // 会弹 toast 提示用户进设置面板下载。
+    let check_update_item =
+        MenuItem::with_id(app, menu_ids::CHECK_UPDATE, "检查更新", true, None::<&str>)
+            .map_err(|e| format!("创建检查更新菜单项失败: {}", e))?;
 
     let exit_item = MenuItem::with_id(app, menu_ids::EXIT, "退出", true, None::<&str>)
         .map_err(|e| format!("创建退出菜单项失败: {}", e))?;
 
-    let separator = PredefinedMenuItem::separator(app)
-        .map_err(|e| format!("创建分隔符失败: {}", e))?;
+    let separator =
+        PredefinedMenuItem::separator(app).map_err(|e| format!("创建分隔符失败: {}", e))?;
 
     MenuBuilder::new(app)
         .item(&show_window_item)
+        .item(&settings_item)
+        .item(&check_update_item)
         .item(&separator)
         .item(&exit_item)
         .build()
@@ -97,6 +110,19 @@ fn handle_menu_event(app: &AppHandle<Wry>, event_id: &str) {
     match event_id {
         menu_ids::SHOW_WINDOW => {
             show_main_window(app);
+        }
+        menu_ids::SETTINGS => {
+            info!("用户请求打开设置");
+            show_main_window(app);
+            let _ = app.emit("open-settings", ());
+        }
+        menu_ids::CHECK_UPDATE => {
+            info!("用户从托盘请求检查更新");
+            // 不强制打开主窗口也不跳设置面板，静默触发一次 check；
+            // useUpdate 的 watch(status) 会在发现新版本时弹 toast，
+            // 但 toast 只在 webview 可见时才能看到，所以顺便把窗口拉出来。
+            show_main_window(app);
+            let _ = app.emit("tray-check-update", ());
         }
         menu_ids::EXIT => {
             info!("用户请求退出应用");
@@ -148,16 +174,14 @@ pub fn set_tray_state(app: &AppHandle<Wry>, state: TrayState) -> Result<(), Stri
         state_manager.set_state(state);
     }
 
-    let tray = app.tray_by_id(TRAY_ID)
-        .ok_or_else(|| "找不到托盘图标".to_string())?;
+    let tray = app.tray_by_id(TRAY_ID).ok_or_else(|| "找不到托盘图标".to_string())?;
 
     let tooltip = match state {
         TrayState::Idle => "CCAR Copilot",
         TrayState::Processing => "CCAR Copilot - 处理中...",
     };
 
-    tray.set_tooltip(Some(tooltip))
-        .map_err(|e| format!("设置托盘提示失败: {}", e))?;
+    tray.set_tooltip(Some(tooltip)).map_err(|e| format!("设置托盘提示失败: {}", e))?;
 
     info!("托盘状态已更新: {:?}", state);
     Ok(())
@@ -169,9 +193,8 @@ pub fn setup_tray(app: &AppHandle<Wry>) -> Result<(), String> {
 
     let menu = create_tray_menu(app)?;
 
-    let icon_data = include_bytes!("../../icons/tray-icon@2x.png");
-    let icon = Image::from_bytes(icon_data)
-        .map_err(|e| format!("无法加载托盘图标: {}", e))?;
+    let icon_data = include_bytes!("../../../resources/PNG/huge-ccar.png");
+    let icon = Image::from_bytes(icon_data).map_err(|e| format!("无法加载托盘图标: {}", e))?;
 
     let _tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
@@ -193,10 +216,7 @@ pub fn setup_tray(app: &AppHandle<Wry>) -> Result<(), String> {
                     info!("托盘图标左键单击，显示主窗口");
                     show_main_window(app);
                 }
-                TrayIconEvent::DoubleClick {
-                    button: MouseButton::Left,
-                    ..
-                } => {
+                TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
                     info!("托盘图标双击");
                     show_main_window(app);
                 }

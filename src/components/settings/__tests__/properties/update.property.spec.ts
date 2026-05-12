@@ -34,6 +34,8 @@ function createTestI18n() {
         settings: {
           update: {
             title: 'Update',
+            settings: 'Auto-Check & Proxy',
+            currentVersion: 'Current Version',
             autoCheck: 'Auto Check',
             autoCheckHelp: 'Automatically check for updates',
             checkInterval: 'Check Interval',
@@ -46,6 +48,27 @@ function createTestI18n() {
             checkNowBtn: 'Check',
             checking: 'Checking...',
             lastCheck: 'Last Check',
+            // v0.1.6 新增 - 同步测试 i18n fixture,避免 intlify warning
+            statusError: 'Failed to check for updates',
+            statusUpToDate: 'You are up to date',
+            statusAvailable: 'Update available',
+            statusDownloading: 'Downloading update...',
+            statusInstalling: 'Installing update...',
+            statusPendingRestart: 'Update downloaded, restart to apply',
+            downloadAndInstall: 'Download and Install',
+            restartNow: 'Restart Now',
+            releaseDate: 'Release Date',
+            retry: 'Retry',
+            skipThisVersion: 'Skip this version',
+            currentToNew: 'Current {current} → New {next}',
+            downloadSpeed: 'Speed',
+            downloadEta: 'ETA',
+            etaSeconds: '{n}s',
+            etaMinutes: '{n} min',
+            etaHours: '{n} h',
+            toastNewVersion: 'New version {version} available',
+            toastDownloaded: '{version} downloaded',
+            toastError: 'Update failed: {message}',
           }
         }
       }
