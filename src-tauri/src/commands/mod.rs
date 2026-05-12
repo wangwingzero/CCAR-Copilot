@@ -12,6 +12,7 @@
 
 pub mod config_cmd;
 pub mod file_cmd;
+pub mod file_search_cmd;
 pub mod tray_cmd;
 pub mod update_cmd;
 
