@@ -360,6 +360,7 @@ const processResult = ref<{
 const scanFolders = ref<string[]>([])
 const isScanningSelectedFolders = ref(false)
 const currentScanFolder = ref('')
+const showMaintenanceMenu = ref(false)
 
 // 状态统一通过 useRegulationQuery composable 获取（已在上方解构）
 
@@ -1025,13 +1026,17 @@ async function handleAddScanFolder(): Promise<void> {
       title: '选择要扫描的文件夹',
     })
 
+    if (!selected) return
+
+    const previousLength = scanFolders.value.length
     const nextFolders = addScanFolders(scanFolders.value, selected)
-    const addedCount = nextFolders.length - scanFolders.value.length
+    const newlyAdded = nextFolders.slice(previousLength)
     scanFolders.value = nextFolders
 
-    if (addedCount > 0) {
-      showToast(`已添加 ${addedCount} 个文件夹`, 'success')
-    } else if (selected) {
+    if (newlyAdded.length > 0) {
+      showToast(`已添加 ${newlyAdded.length} 个文件夹，开始扫描...`, 'success')
+      await scanFolderQueue(newlyAdded)
+    } else {
       showToast('选择的文件夹已在列表中', 'info')
     }
   } catch (err) {
@@ -1502,227 +1507,291 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
           显示内容摘要
         </label>
         <div v-if="isLocalIndexReady" class="local-index-info">
-          <span class="index-badge"> 本地已索引 {{ localDocCount }} 篇 </span>
-          <span v-if="searchPerformanceHint" class="perf-hint">
-            {{ searchPerformanceHint }}
-          </span>
-          <button
-            class="process-btn"
-            :disabled="isProcessingFiles"
-            title="先提取 PDF 自带文字；扫描件会自动进入 OCR 识别并写入索引"
-            @click="handleProcessPending"
-          >
-            {{ processPendingButtonLabel }}
-          </button>
-          <button
-            class="requeue-mineru-btn"
-            :disabled="isRequeueingForMineru || isProcessingFiles"
-            title="按 OCR 引擎筛选范围（pp_ocrv4 / pdfium / unknown / 非 mineru / 全部）重做，重置后请点「处理待索引/OCR」启动。"
-            @click="openRequeueDialog"
-          >
-            {{ isRequeueingForMineru ? '重置中...' : '重做OCR(MinerU)' }}
-          </button>
-          <button
-            v-if="(dbSyncStatus?.failed_ocr ?? 0) > 0"
-            class="clean-invalid-btn"
-            :disabled="isCleaningInvalid || isProcessingFiles"
-            title="清理文件后缀非 .pdf 或文件已从磁盘删除的残留记录（这些记录重试 OCR 永远不会成功）"
-            @click="handleCleanInvalid"
-          >
-            {{ isCleaningInvalid ? '清理中...' : '清理无效记录' }}
-          </button>
-          <button
-            class="realign-filenames-btn"
-            :disabled="isRealigningFilenames || isProcessingFiles"
-            title="把磁盘上的 <hash>.pdf 历史文件批量重命名为「文号_标题.pdf」，并同步更新数据库与搜索索引"
-            @click="handleRealignFilenames"
-          >
-            {{ isRealigningFilenames ? '对齐中...' : '一键对齐文件名' }}
-          </button>
-          <button
-            v-if="(dbSyncStatus?.failed_ocr ?? 0) > 0"
-            class="retry-ocr-btn"
-            :disabled="isRetryingOcr || isProcessingFiles"
-            title="把 ocr_status='failed' 的记录重置为 pending 并立即重新跑 OCR"
-            @click="handleRetryFailedOcr"
-          >
-            {{
-              isRetryingOcr
-                ? '重试中...'
-                : `重试失败 OCR (${dbSyncStatus?.failed_ocr ?? 0})`
-            }}
-          </button>
-          <button
-            class="sync-compare-btn"
-            :disabled="isSyncing"
-            title="从 CAAC 官网全量爬取规章列表，与本地对比差异"
-            @click="handleSyncCompare"
-          >
-            {{ isSyncing ? '同步中...' : '同步对比官网' }}
-          </button>
-          <button
-            class="add-folder-btn"
-            :disabled="isScanning || isScanningSelectedFolders"
-            title="添加要扫描的本地文件夹"
-            @click="handleAddScanFolder"
-          >
-            添加扫描文件夹
-          </button>
-          <button
-            class="scan-selected-btn"
-            :disabled="!canScanSelectedFolders"
-            title="扫描所有已添加的文件夹，新增记录并自动处理"
-            @click="handleScanSelectedFolders"
-          >
-            {{ isScanningSelectedFolders ? '扫描中...' : '扫描已选文件夹' }}
-          </button>
+          <span class="index-status-dot" title="本地索引已就绪"></span>
+          <span class="index-status-text">本地索引就绪</span>
+          <span v-if="searchPerformanceHint" class="perf-hint">{{ searchPerformanceHint }}</span>
         </div>
+      </div>
 
-        <div v-if="scanFolders.length > 0" class="scan-folder-header">
-          <span>扫描文件夹 {{ scanFolders.length }} 个</span>
-          <button
-            class="scan-folder-clear"
-            :disabled="isScanning || isScanningSelectedFolders"
-            @click="handleClearScanFolders"
-          >
-            清空
-          </button>
-        </div>
-        <div v-if="scanFolders.length > 0" class="scan-folder-list">
-            <div
-              v-for="folder in scanFolders"
-              :key="folder"
-              :class="['scan-folder-item', { active: currentScanFolder === folder }]"
+      <!-- 主操作区(常用) -->
+      <div class="action-bar" role="toolbar" aria-label="规章管理操作">
+        <button
+          class="action-btn primary"
+          :disabled="isScanning || isScanningSelectedFolders"
+          title="选择本地文件夹,程序会递归收集 PDF 并加入索引"
+          @click="handleAddScanFolder"
+        >
+          <span class="action-icon" aria-hidden="true">📁</span>
+          {{ isScanningSelectedFolders ? '扫描中...' : '添加并扫描本地文件夹' }}
+        </button>
+        <button
+          class="action-btn"
+          :disabled="isProcessingFiles"
+          title="先提取 PDF 自带文字;扫描件会自动进入 OCR 识别并写入索引"
+          @click="handleProcessPending"
+        >
+          {{ processPendingButtonLabel }}
+        </button>
+        <button
+          class="action-btn"
+          :disabled="isSyncing"
+          title="从 CAAC 官网全量爬取规章列表,与本地对比差异"
+          @click="handleSyncCompare"
+        >
+          <span class="action-icon" aria-hidden="true">↻</span>
+          {{ isSyncing ? '同步中...' : '同步对比官网' }}
+        </button>
+
+        <div class="action-spacer"></div>
+
+        <button
+          class="maintenance-trigger"
+          :class="{ active: showMaintenanceMenu }"
+          :aria-expanded="showMaintenanceMenu"
+          aria-controls="maintenance-menu"
+          title="高级维护工具(对齐文件名 / 重做 OCR / 清理记录 等)"
+          @click="showMaintenanceMenu = !showMaintenanceMenu"
+        >
+          维护工具
+          <span class="caret" aria-hidden="true">{{ showMaintenanceMenu ? '▴' : '▾' }}</span>
+        </button>
+      </div>
+
+      <!-- 维护工具折叠区 -->
+      <div v-if="showMaintenanceMenu" id="maintenance-menu" class="maintenance-menu" role="menu">
+        <button
+          class="maintenance-item"
+          role="menuitem"
+          :disabled="isRealigningFilenames || isProcessingFiles"
+          @click="handleRealignFilenames"
+        >
+          <span class="maint-name">{{
+            isRealigningFilenames ? '对齐中...' : '一键对齐文件名'
+          }}</span>
+          <span class="maint-desc">把磁盘上的 hash 文件名批量重命名为「文号_标题.pdf」</span>
+        </button>
+        <button
+          class="maintenance-item"
+          role="menuitem"
+          :disabled="isRequeueingForMineru || isProcessingFiles"
+          @click="openRequeueDialog"
+        >
+          <span class="maint-name">{{
+            isRequeueingForMineru ? '重置中...' : '重做 OCR (MinerU)'
+          }}</span>
+          <span class="maint-desc">按引擎筛选范围(pp_ocrv4 / pdfium / unknown 等)重新 OCR</span>
+        </button>
+        <button
+          v-if="(dbSyncStatus?.failed_ocr ?? 0) > 0"
+          class="maintenance-item warning"
+          role="menuitem"
+          :disabled="isRetryingOcr || isProcessingFiles"
+          @click="handleRetryFailedOcr"
+        >
+          <span class="maint-name">{{
+            isRetryingOcr ? '重试中...' : `重试失败 OCR (${dbSyncStatus?.failed_ocr ?? 0})`
+          }}</span>
+          <span class="maint-desc">把 failed 记录重置为 pending 并立即重新 OCR</span>
+        </button>
+        <button
+          v-if="(dbSyncStatus?.failed_ocr ?? 0) > 0"
+          class="maintenance-item"
+          role="menuitem"
+          :disabled="isCleaningInvalid || isProcessingFiles"
+          @click="handleCleanInvalid"
+        >
+          <span class="maint-name">{{ isCleaningInvalid ? '清理中...' : '清理无效记录' }}</span>
+          <span class="maint-desc">删除磁盘已不存在或后缀非 .pdf 的残留(重试永远失败的记录)</span>
+        </button>
+      </div>
+
+      <!-- 扫描文件夹列表(始终显示,空态有引导卡片) -->
+      <div class="scan-folder-section">
+        <div class="scan-folder-header">
+          <span>已添加扫描文件夹 {{ scanFolders.length }} 个</span>
+          <div class="scan-folder-header-actions">
+            <button
+              v-if="scanFolders.length > 0"
+              class="scan-folder-rescan"
+              :disabled="!canScanSelectedFolders"
+              title="重扫所有已添加的文件夹"
+              @click="handleScanSelectedFolders"
             >
-              <div class="scan-folder-text">
-                <span class="scan-folder-name">{{ formatFolderName(folder) }}</span>
-                <span class="scan-folder-path" :title="folder">{{ folder }}</span>
-              </div>
-              <span
-                v-if="isScanningSelectedFolders && currentScanFolder === folder"
-                class="scan-folder-status"
-              >
-                扫描中
-              </span>
-              <button
-                class="scan-folder-action"
-                :disabled="isScanning || isScanningSelectedFolders"
-                @click="handleScanFolder(folder)"
-              >
-                扫描
-              </button>
-              <button
-                class="scan-folder-remove"
-                :disabled="isScanning || isScanningSelectedFolders"
-                @click="handleRemoveScanFolder(folder)"
-              >
-                移除
-              </button>
-            </div>
+              {{ isScanningSelectedFolders ? '重扫中...' : '重扫全部' }}
+            </button>
+            <button
+              v-if="scanFolders.length > 0"
+              class="scan-folder-clear"
+              :disabled="isScanning || isScanningSelectedFolders"
+              @click="handleClearScanFolders"
+            >
+              清空
+            </button>
           </div>
-
-        <div v-if="isProcessingFiles && processingProgressText" class="processing-status">
-          {{ processingProgressText }}
         </div>
 
-        <!-- 扫描进度 -->
-        <div v-if="isScanning && scanProgress" class="scan-progress">
-          <div class="scan-progress-bar">
-            <div class="scan-progress-fill" :style="{ width: scanProgressPercent }"></div>
+        <div v-if="scanFolders.length === 0" class="scan-folder-empty">
+          <span class="scan-folder-empty-icon" aria-hidden="true">📂</span>
+          <div class="scan-folder-empty-text">
+            <p class="scan-folder-empty-title">还没添加扫描文件夹</p>
+            <p class="scan-folder-empty-hint">
+              点上方「<strong>📁 添加并扫描本地文件夹</strong>」按钮选择 PDF
+              所在目录,程序会递归收集所有 PDF 加入索引
+            </p>
           </div>
-          <div class="scan-progress-info">
-            <span v-if="scanProgress.phase === 'discovering'">正在发现文件...</span>
-            <span v-else-if="scanProgress.phase === 'ocr'">
-              OCR 识别中 {{ scanProgress.ocr_processed ?? 0 }}/{{
-                scanProgress.ocr_total ?? 0
-              }}
-              （文本提取已完成 {{ scanProgress.indexed }} 个）
-            </span>
-            <span v-else>
-              {{ scanProgress.scanned }}/{{ scanProgress.total_found }} | 新增
-              {{ scanProgress.new_files }} | 重复 {{ scanProgress.duplicates }} | 索引
-              {{ scanProgress.indexed }} | 待OCR {{ scanProgress.needs_ocr }}
-            </span>
-          </div>
+        </div>
+
+        <div v-else class="scan-folder-list">
           <div
-            v-if="scanProgress.current_file"
-            class="scan-current-file"
-            :title="scanProgress.current_file"
+            v-for="folder in scanFolders"
+            :key="folder"
+            :class="['scan-folder-item', { active: currentScanFolder === folder }]"
           >
-            {{ scanProgress.current_file }}
-          </div>
-        </div>
-
-        <!-- 扫描结果 -->
-        <div v-if="scanResult && !isScanning" class="scan-result">
-          <span>扫描完成: 发现 {{ scanResult.total_found }} 个文件</span>
-          <span>| 新增 {{ scanResult.new_files }}</span>
-          <span>| 重复 {{ scanResult.duplicates }}</span>
-          <span>| 直接索引 {{ scanResult.indexed }}</span>
-          <span v-if="scanResult.ocr_success > 0">| OCR 索引 {{ scanResult.ocr_success }}</span>
-          <span v-if="scanResult.ocr_failed > 0" class="scan-failed"
-            >| OCR 失败 {{ scanResult.ocr_failed }}</span
-          >
-          <span v-if="scanResult.failed > 0" class="scan-failed"
-            >| 失败 {{ scanResult.failed }}</span
-          >
-          <button
-            v-if="scanResult.ocr_failed > 0 || (dbSyncStatus && dbSyncStatus.failed_ocr > 0)"
-            class="retry-ocr-btn"
-            :disabled="isRetryingOcr"
-            title="重新处理失败的 OCR 文件"
-            @click="handleRetryFailedOcr"
-          >
-            {{
-              isRetryingOcr
-                ? '重试中...'
-                : `重试 OCR (${scanResult.ocr_failed || dbSyncStatus?.failed_ocr || 0})`
-            }}
-          </button>
-        </div>
-
-        <!-- 同步对比结果 -->
-        <div v-if="syncResult && !isSyncing" class="sync-result">
-          <div class="sync-summary">
-            <span>同步对比: 在线 {{ syncResult.online_total }} 条</span>
-            <span>| 已匹配 {{ syncResult.matched }}</span>
-            <span v-if="syncResult.new_regulations.length > 0" class="sync-new">
-              | 新增 {{ syncResult.new_regulations.length }}
-            </span>
-            <span v-if="syncResult.changed_regulations.length > 0">
-              | 变化 {{ syncResult.changed_regulations.length }}
-            </span>
-            <span v-if="syncResult.local_only > 0">| 仅本地 {{ syncResult.local_only }}</span>
-            <span v-if="(syncResult.downloaded ?? 0) > 0" class="sync-new">
-              | 已下载 {{ syncResult.downloaded }}
-            </span>
-            <span v-if="(syncResult.download_failed ?? 0) > 0" class="scan-failed">
-              | 下载失败 {{ syncResult.download_failed }}
-            </span>
-          </div>
-          <div v-if="syncResult.new_regulations.length > 0" class="sync-new-list">
-            <div class="sync-list-header">
-              新增规章 ({{ syncResult.new_regulations.length }} 条)
+            <div class="scan-folder-text">
+              <span class="scan-folder-name">{{ formatFolderName(folder) }}</span>
+              <span class="scan-folder-path" :title="folder">{{ folder }}</span>
             </div>
-            <div
-              v-for="reg in syncResult.new_regulations.slice(0, 20)"
-              :key="reg.url"
-              class="sync-item"
+            <span
+              v-if="isScanningSelectedFolders && currentScanFolder === folder"
+              class="scan-folder-status"
             >
-              <span class="sync-item-title" @click="openUrl(reg.url)">{{ reg.title }}</span>
-              <span v-if="reg.doc_number" class="sync-item-meta">{{ reg.doc_number }}</span>
-              <span
-                :class="[
-                  'sync-item-validity',
-                  reg.online_validity === '有效' ? 'valid' : 'invalid',
-                ]"
-              >
-                {{ reg.online_validity }}
-              </span>
-            </div>
-            <div v-if="syncResult.new_regulations.length > 20" class="sync-more">
-              ... 还有 {{ syncResult.new_regulations.length - 20 }} 条
-            </div>
+              扫描中
+            </span>
+            <button
+              class="scan-folder-action"
+              :disabled="isScanning || isScanningSelectedFolders"
+              title="重新扫描此文件夹"
+              @click="handleScanFolder(folder)"
+            >
+              扫描
+            </button>
+            <button
+              class="scan-folder-remove"
+              :disabled="isScanning || isScanningSelectedFolders"
+              @click="handleRemoveScanFolder(folder)"
+            >
+              移除
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="isProcessingFiles && processingProgressText" class="processing-status">
+        {{ processingProgressText }}
+      </div>
+
+      <!-- 当前扫描文件夹横幅(批量扫描时显示) -->
+      <div
+        v-if="isScanningSelectedFolders && currentScanFolder"
+        class="scanning-folder-banner"
+        role="status"
+        aria-live="polite"
+      >
+        <span class="scanning-folder-spinner" aria-hidden="true"></span>
+        <div class="scanning-folder-text">
+          <strong>正在扫描文件夹</strong>
+          <span class="scanning-folder-path" :title="currentScanFolder">{{ currentScanFolder }}</span>
+        </div>
+        <span class="scanning-folder-count"
+          >{{ scanFolders.indexOf(currentScanFolder) + 1 }} / {{ scanFolders.length }}</span
+        >
+      </div>
+
+      <!-- 扫描进度 -->
+      <div v-if="isScanning && scanProgress" class="scan-progress">
+        <div class="scan-progress-bar">
+          <div class="scan-progress-fill" :style="{ width: scanProgressPercent }"></div>
+        </div>
+        <div class="scan-progress-info">
+          <span v-if="scanProgress.phase === 'discovering'">正在发现文件...</span>
+          <span v-else-if="scanProgress.phase === 'ocr'">
+            OCR 识别中 {{ scanProgress.ocr_processed ?? 0 }}/{{
+              scanProgress.ocr_total ?? 0
+            }}
+            （文本提取已完成 {{ scanProgress.indexed }} 个）
+          </span>
+          <span v-else>
+            {{ scanProgress.scanned }}/{{ scanProgress.total_found }} | 新增
+            {{ scanProgress.new_files }} | 重复 {{ scanProgress.duplicates }} | 索引
+            {{ scanProgress.indexed }} | 待OCR {{ scanProgress.needs_ocr }}
+          </span>
+        </div>
+        <div
+          v-if="scanProgress.current_file"
+          class="scan-current-file"
+          :title="scanProgress.current_file"
+        >
+          {{ scanProgress.current_file }}
+        </div>
+      </div>
+
+      <!-- 扫描结果 -->
+      <div v-if="scanResult && !isScanning" class="scan-result">
+        <span>扫描完成: 发现 {{ scanResult.total_found }} 个文件</span>
+        <span>| 新增 {{ scanResult.new_files }}</span>
+        <span>| 重复 {{ scanResult.duplicates }}</span>
+        <span>| 直接索引 {{ scanResult.indexed }}</span>
+        <span v-if="scanResult.ocr_success > 0">| OCR 索引 {{ scanResult.ocr_success }}</span>
+        <span v-if="scanResult.ocr_failed > 0" class="scan-failed"
+          >| OCR 失败 {{ scanResult.ocr_failed }}</span
+        >
+        <span v-if="scanResult.failed > 0" class="scan-failed"
+          >| 失败 {{ scanResult.failed }}</span
+        >
+        <button
+          v-if="scanResult.ocr_failed > 0 || (dbSyncStatus && dbSyncStatus.failed_ocr > 0)"
+          class="retry-ocr-btn"
+          :disabled="isRetryingOcr"
+          title="重新处理失败的 OCR 文件"
+          @click="handleRetryFailedOcr"
+        >
+          {{
+            isRetryingOcr
+              ? '重试中...'
+              : `重试 OCR (${scanResult.ocr_failed || dbSyncStatus?.failed_ocr || 0})`
+          }}
+        </button>
+      </div>
+
+      <!-- 同步对比结果 -->
+      <div v-if="syncResult && !isSyncing" class="sync-result">
+        <div class="sync-summary">
+          <span>同步对比: 在线 {{ syncResult.online_total }} 条</span>
+          <span>| 已匹配 {{ syncResult.matched }}</span>
+          <span v-if="syncResult.new_regulations.length > 0" class="sync-new">
+            | 新增 {{ syncResult.new_regulations.length }}
+          </span>
+          <span v-if="syncResult.changed_regulations.length > 0">
+            | 变化 {{ syncResult.changed_regulations.length }}
+          </span>
+          <span v-if="syncResult.local_only > 0">| 仅本地 {{ syncResult.local_only }}</span>
+          <span v-if="(syncResult.downloaded ?? 0) > 0" class="sync-new">
+            | 已下载 {{ syncResult.downloaded }}
+          </span>
+          <span v-if="(syncResult.download_failed ?? 0) > 0" class="scan-failed">
+            | 下载失败 {{ syncResult.download_failed }}
+          </span>
+        </div>
+        <div v-if="syncResult.new_regulations.length > 0" class="sync-new-list">
+          <div class="sync-list-header">新增规章 ({{ syncResult.new_regulations.length }} 条)</div>
+          <div
+            v-for="reg in syncResult.new_regulations.slice(0, 20)"
+            :key="reg.url"
+            class="sync-item"
+          >
+            <span class="sync-item-title" @click="openUrl(reg.url)">{{ reg.title }}</span>
+            <span v-if="reg.doc_number" class="sync-item-meta">{{ reg.doc_number }}</span>
+            <span
+              :class="[
+                'sync-item-validity',
+                reg.online_validity === '有效' ? 'valid' : 'invalid',
+              ]"
+            >
+              {{ reg.online_validity }}
+            </span>
+          </div>
+          <div v-if="syncResult.new_regulations.length > 20" class="sync-more">
+            ... 还有 {{ syncResult.new_regulations.length - 20 }} 条
           </div>
         </div>
       </div>
@@ -2592,34 +2661,9 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
   font-size: 12px;
 }
 
-.index-badge {
-  color: var(--text-secondary, #666);
-}
-
 .perf-hint {
   color: #52c41a;
   font-weight: 500;
-}
-
-.process-btn {
-  padding: 4px 10px;
-  border: 1px solid var(--border-color, #333);
-  background: transparent;
-  color: var(--text-secondary, #888);
-  border-radius: 4px;
-  font-size: 11px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.process-btn:hover:not(:disabled) {
-  background: var(--bg-hover, #333);
-  color: var(--text-primary, #e0e0e0);
-}
-
-.process-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .scan-add-btn,
@@ -2646,332 +2690,8 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
   cursor: not-allowed;
 }
 
-.ocr-progress {
-  margin-top: 6px;
-  padding: 4px 12px;
-  font-size: 11px;
-  color: #722ed1;
-  background: rgba(114, 46, 209, 0.08);
-  border-radius: 4px;
-}
-
-.sync-btn {
-  padding: 4px 10px;
-  border: 1px solid #faad14;
-  background: transparent;
-  color: #faad14;
-  border-radius: 4px;
-  font-size: 11px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.sync-btn:hover:not(:disabled) {
-  background: #faad14;
-  color: white;
-}
-
-.sync-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* 同步对比结果 */
-.sync-result {
-  margin-top: 8px;
-  border: 1px solid rgba(250, 173, 20, 0.3);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.sync-summary {
-  padding: 6px 12px;
-  background: rgba(250, 173, 20, 0.1);
-  font-size: 11px;
-  color: #faad14;
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.sync-new {
-  color: #52c41a;
-  font-weight: 500;
-}
-
-.sync-new-list {
-  max-height: 200px;
-  overflow-y: auto;
-}
-
-.sync-list-header {
-  padding: 6px 12px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-secondary, #888);
-  background: var(--bg-secondary, #242424);
-  border-bottom: 1px solid var(--border-color, #333);
-}
-
-.sync-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 12px;
-  font-size: 11px;
-  border-bottom: 1px solid var(--border-color, #333);
-}
-
-.sync-item:last-child {
-  border-bottom: none;
-}
-
-.sync-item-title {
-  flex: 1;
-  cursor: pointer;
-  color: var(--text-primary, #e0e0e0);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sync-item-title:hover {
-  color: var(--primary-color, #4a9eff);
-}
-
-.sync-item-meta {
-  color: var(--text-secondary, #888);
-  white-space: nowrap;
-}
-
-.sync-item-validity {
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 10px;
-  white-space: nowrap;
-}
-
-.sync-item-validity.valid {
-  background: rgba(82, 196, 26, 0.15);
-  color: #52c41a;
-}
-
-.sync-item-validity.invalid {
-  background: rgba(255, 77, 79, 0.15);
-  color: #ff4d4f;
-}
-
-.sync-more {
-  padding: 4px 12px;
-  font-size: 10px;
-  color: var(--text-secondary, #888);
-  text-align: center;
-}
-
-/* 指定文件夹扫描 */
-.scan-folder-section {
-  width: 100%;
-  margin-top: 8px;
-  border: 1px solid rgba(82, 196, 26, 0.28);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.scan-folder-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 10px;
-  background: rgba(82, 196, 26, 0.08);
-  color: #52c41a;
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.scan-folder-clear {
-  padding: 2px 8px;
-  border: 1px solid rgba(82, 196, 26, 0.45);
-  background: transparent;
-  color: #52c41a;
-  border-radius: 3px;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.scan-folder-clear:hover:not(:disabled) {
-  background: #52c41a;
-  color: white;
-}
-
-.scan-folder-clear:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.scan-folder-list {
-  display: flex;
-  flex-direction: column;
-}
-
-.scan-folder-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-top: 1px solid var(--border-color, #333);
-  background: var(--bg-primary, #1c1c1e);
-}
-
-.scan-folder-item.active {
-  background: rgba(82, 196, 26, 0.1);
-}
-
-.scan-folder-text {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.scan-folder-name {
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-primary, #e0e0e0);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.scan-folder-path {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-secondary, #888);
-  font-size: 11px;
-}
-
-.scan-folder-status {
-  flex-shrink: 0;
-  color: #52c41a;
-  font-size: 11px;
-}
-
-.scan-folder-action,
-.scan-folder-remove {
-  flex-shrink: 0;
-  padding: 2px 8px;
-  border: 1px solid var(--border-color, #333);
-  background: transparent;
-  color: var(--text-secondary, #888);
-  border-radius: 3px;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.scan-folder-action:hover:not(:disabled) {
-  border-color: #52c41a;
-  color: #52c41a;
-}
-
-.scan-folder-remove:hover:not(:disabled) {
-  border-color: #ff4d4f;
-  color: #ff4d4f;
-}
-
-.scan-folder-action:disabled,
-.scan-folder-remove:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.processing-status {
-  margin-top: 8px;
-  padding: 6px 10px;
-  border-radius: 4px;
-  background: rgba(24, 144, 255, 0.08);
-  color: var(--primary-color, #1890ff);
-  font-size: 12px;
-}
-
-/* 扫描进度 */
-.scan-progress {
-  margin-top: 8px;
-  padding: 8px 12px;
-  background: var(--bg-secondary, #242424);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 6px;
-}
-
-.scan-progress-bar {
-  height: 4px;
-  background: var(--border-color, #333);
-  border-radius: 2px;
-  overflow: hidden;
-  margin-bottom: 6px;
-}
-
-.scan-progress-fill {
-  height: 100%;
-  background: #52c41a;
-  transition: width 0.3s ease;
-  border-radius: 2px;
-}
-
-.scan-progress-info {
-  font-size: 11px;
-  color: var(--text-secondary, #888);
-}
-
-.scan-current-file {
-  font-size: 11px;
-  color: var(--text-secondary, #666);
-  margin-top: 4px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* 扫描结果 */
-.scan-result {
-  margin-top: 8px;
-  padding: 6px 12px;
-  background: rgba(82, 196, 26, 0.1);
-  border: 1px solid rgba(82, 196, 26, 0.3);
-  border-radius: 4px;
-  font-size: 11px;
-  color: #52c41a;
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  align-items: center;
-}
-
 .scan-failed {
   color: #ff4d4f;
-}
-
-.requeue-mineru-btn {
-  padding: 5px 12px;
-  font-size: 12px;
-  background: #fff7e6;
-  color: #d46b08;
-  border: 1px solid #ffd591;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-}
-
-.requeue-mineru-btn:hover:not(:disabled) {
-  background: #ffe7ba;
-}
-
-.requeue-mineru-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .retry-ocr-btn {
@@ -2992,78 +2712,6 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
 }
 
 .retry-ocr-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.clean-invalid-btn {
-  padding: 5px 12px;
-  margin-left: 6px;
-  border: 1px solid #faad14;
-  background: white;
-  color: #faad14;
-  border-radius: 4px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.clean-invalid-btn:hover:not(:disabled) {
-  background: #faad14;
-  color: white;
-}
-
-.clean-invalid-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.realign-filenames-btn {
-  padding: 5px 12px;
-  margin-left: 6px;
-  border: 1px solid #1890ff;
-  background: white;
-  color: #1890ff;
-  border-radius: 4px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.realign-filenames-btn:hover:not(:disabled) {
-  background: #1890ff;
-  color: white;
-}
-
-.realign-filenames-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.sync-compare-btn,
-.add-folder-btn,
-.scan-selected-btn {
-  padding: 5px 12px;
-  margin-left: 6px;
-  border: 1px solid #52c41a;
-  background: white;
-  color: #52c41a;
-  border-radius: 4px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.sync-compare-btn:hover:not(:disabled),
-.add-folder-btn:hover:not(:disabled),
-.scan-selected-btn:hover:not(:disabled) {
-  background: #52c41a;
-  color: white;
-}
-
-.sync-compare-btn:disabled,
-.add-folder-btn:disabled,
-.scan-selected-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -3504,5 +3152,298 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
 .toast-slide-leave-to {
   opacity: 0;
   transform: translateX(-50%) translateY(16px);
+}
+
+/* ============================================
+ * v0.1.7 UX 重构: 主操作栏 + 维护工具折叠 + 文件夹空态
+ * ============================================ */
+
+/* 索引就绪指示器(替代之前的"本地已索引 X 篇" badge) */
+.index-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #52c41a;
+  box-shadow: 0 0 4px rgba(82, 196, 26, 0.6);
+}
+
+.index-status-text {
+  color: var(--text-secondary, #999);
+  font-size: 12px;
+}
+
+/* 主操作栏 */
+.action-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-color, #2f2f33);
+}
+
+.action-bar .action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--border-color, #333);
+  background: transparent;
+  color: var(--text-primary, #e0e0e0);
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.action-bar .action-btn:hover:not(:disabled) {
+  border-color: #52c41a;
+  color: #52c41a;
+}
+
+.action-bar .action-btn.primary {
+  border-color: #52c41a;
+  color: #52c41a;
+  background: rgba(82, 196, 26, 0.06);
+  font-weight: 500;
+}
+
+.action-bar .action-btn.primary:hover:not(:disabled) {
+  background: #52c41a;
+  color: white;
+}
+
+.action-bar .action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.action-bar .action-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.action-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 维护工具折叠开关 */
+.maintenance-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border: 1px dashed var(--border-color, #444);
+  background: transparent;
+  color: var(--text-secondary, #999);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.maintenance-trigger:hover {
+  border-style: solid;
+  color: var(--text-primary, #e0e0e0);
+}
+
+.maintenance-trigger.active {
+  border-style: solid;
+  border-color: #1890ff;
+  color: #1890ff;
+}
+
+.maintenance-trigger .caret {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* 维护工具菜单 */
+.maintenance-menu {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg-secondary, #2a2a2c);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+}
+
+.maintenance-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg-primary, #1c1c1e);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 4px;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.maintenance-item:hover:not(:disabled) {
+  border-color: #1890ff;
+  background: rgba(24, 144, 255, 0.04);
+}
+
+.maintenance-item.warning {
+  border-color: rgba(255, 77, 79, 0.4);
+}
+
+.maintenance-item.warning:hover:not(:disabled) {
+  border-color: #ff4d4f;
+  background: rgba(255, 77, 79, 0.06);
+}
+
+.maintenance-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.maintenance-item .maint-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary, #e0e0e0);
+}
+
+.maintenance-item .maint-desc {
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  line-height: 1.4;
+}
+
+/* 扫描文件夹列表头部容器 */
+.scan-folder-header-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.scan-folder-rescan {
+  padding: 2px 10px;
+  border: 1px solid rgba(82, 196, 26, 0.45);
+  background: transparent;
+  color: #52c41a;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.scan-folder-rescan:hover:not(:disabled) {
+  background: #52c41a;
+  color: white;
+}
+
+.scan-folder-rescan:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 文件夹列表空态卡片 */
+.scan-folder-empty {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  background: var(--bg-primary, #1c1c1e);
+}
+
+.scan-folder-empty-icon {
+  font-size: 28px;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.scan-folder-empty-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.scan-folder-empty-title {
+  margin: 0 0 4px 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary, #e0e0e0);
+}
+
+.scan-folder-empty-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  line-height: 1.5;
+}
+
+.scan-folder-empty-hint strong {
+  color: #52c41a;
+  font-weight: 500;
+}
+
+/* 批量扫描文件夹时的横幅 */
+.scanning-folder-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: rgba(24, 144, 255, 0.08);
+  border: 1px solid rgba(24, 144, 255, 0.32);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.scanning-folder-spinner {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(24, 144, 255, 0.3);
+  border-top-color: #1890ff;
+  border-radius: 50%;
+  animation: scanning-folder-spin 0.8s linear infinite;
+}
+
+@keyframes scanning-folder-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.scanning-folder-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.scanning-folder-text strong {
+  color: #1890ff;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.scanning-folder-path {
+  color: var(--text-secondary, #999);
+  font-size: 11px;
+  font-family: 'Consolas', 'Courier New', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scanning-folder-count {
+  flex-shrink: 0;
+  color: #1890ff;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  background: rgba(24, 144, 255, 0.15);
+  border-radius: 10px;
 }
 </style>
