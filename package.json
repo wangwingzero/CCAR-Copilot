@@ -1,7 +1,7 @@
 {
   "name": "ccar-copilot",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,10 +9,12 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "lint": "eslint src/ --ext .ts,.vue",
-    "lint:fix": "eslint src/ --ext .ts,.vue --fix",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "type-check": "vue-tsc --noEmit",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:unit": "vitest run",
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
