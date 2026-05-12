@@ -22,6 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+*.code-workspace
 
 # Rust
 src-tauri/target/
@@ -35,6 +36,7 @@ src-tauri/*.sig
 # Python Sidecar
 python/__pycache__/
 python/*.pyc
+scripts/__pycache__/
 python/.pytest_cache/
 python/.hypothesis/
 python/dist/
@@ -58,6 +60,10 @@ coverage/
 .env.local
 .env.*.local
 
+# 本地发布凭证(绝不进 git)
+# RELEASE_NOTES.md 是累积 changelog, 走 git 管理
+scripts/release.env.ps1
+
 # 临时文件
 tmp/
 temp/
@@ -70,3 +76,6 @@ temp/
 *.AppImage
 .ace-tool/
 nul
+
+# 其他 AI agent 工作区(skill 文件等,跟本仓库代码无关)
+.agents/

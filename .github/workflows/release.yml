@@ -1,8 +1,5 @@
-# Release 工作流 - 构建并发布双版本
+# Release 工作流 - 构建并发布 CCAR Copilot
 # 当推送 v* 标签时触发
-# 发布两个版本:
-#   1. 完整版 (Full) - 包含 Python Sidecar，支持所有功能
-#   2. 精简版 (Lite) - 无 Python 依赖，更小更快
 
 name: Release
 
@@ -25,7 +22,6 @@ jobs:
       contents: write
     outputs:
       release_id: ${{ steps.create_release.outputs.id }}
-      release_upload_url: ${{ steps.create_release.outputs.upload_url }}
       version: ${{ steps.get_version.outputs.VERSION }}
     steps:
       - uses: actions/checkout@v4
@@ -38,39 +34,37 @@ jobs:
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          name: 虎哥截图 v${{ steps.get_version.outputs.VERSION }}
+          name: CCAR Copilot v${{ steps.get_version.outputs.VERSION }}
           draft: true
           prerelease: false
           body: |
-            ## 虎哥截图 v${{ steps.get_version.outputs.VERSION }}
-            
-            ### 下载说明
-            
-            | 版本 | 说明 | 安装包 |
-            |------|------|--------|
-            | **完整版 (Full)** | 包含 Python Sidecar，支持全部功能（公文格式化、翻译、网页抓取等） | `HuGeScreenshot_*_full_*.msi` |
-            | **精简版 (Lite)** | 纯 Rust 实现，无 Python 依赖，体积更小启动更快 | `HuGeScreenshot_*_lite_*.msi` |
-            
-            ### 功能对比
-            
-            | 功能 | 完整版 | 精简版 |
-            |------|--------|--------|
-            | 截图 / OCR / 钉图 | ✅ | ✅ |
-            | 文档检测（打开的 Word/WPS） | ✅ | ✅ |
-            | 公文格式化（直接操作打开的文档） | ✅ | ❌ |
-            | 翻译 | ✅ | ✅（内置翻译） |
-            | 网页抓取 / Markdown 转换 | ✅ | ❌ |
-            | Anki 制卡 | ✅ | ❌ |
-            | 录屏 | ✅ | ❌ |
-            
-            > 建议：如果不需要公文格式化、网页抓取、录屏等功能，选择精简版即可。
+            ## CCAR Copilot v${{ steps.get_version.outputs.VERSION }}
+
+            民航规章检索与同步工具
+
+            ### 功能特性
+
+            | 功能 | 说明 |
+            |------|------|
+            | 规章全文搜索 | Tantivy + jieba 中文分词，支持离线检索 |
+            | 在线规章同步 | 自动下载 CAAC 民航规章、规范性文件、标准规范 |
+            | OCR 识别 | OpenVINO + PP-OCRv4 高精度中英文识别 |
+            | PDF 文本提取 | 基于 Google PDFium 引擎 |
+            | 多语言界面 | 中文 / English |
+
+            ### 下载
+
+            | 文件 | 说明 |
+            |------|------|
+            | `CCAR.Copilot_*.msi` | Windows MSI 安装包 |
+            | `CCAR.Copilot_*.exe` | Windows NSIS 安装包 |
           generate_release_notes: true
 
   # ============================================
-  # Windows 构建 - 完整版 (含 Python Sidecar)
+  # Windows 构建
   # ============================================
-  build-windows-full:
-    name: Build Windows (Full)
+  build-windows:
+    name: Build Windows
     needs: create-release
     runs-on: windows-latest
     permissions:
@@ -85,7 +79,6 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-          prefix-key: full
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -93,30 +86,10 @@ jobs:
           node-version: 'lts/*'
           cache: 'npm'
 
-      - name: Setup Python (for Sidecar)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Build Python Sidecar
-        working-directory: python
-        run: |
-          pip install -r requirements.txt
-          pip install pyinstaller
-          python -m PyInstaller huge_sidecar.spec --clean --noconfirm
-          # 复制到 binaries 目录
-          $SidecarExe = "huge_sidecar-x86_64-pc-windows-msvc.exe"
-          $DistDir = "dist/huge_sidecar"
-          $BinDir = "../src-tauri/binaries"
-          if (Test-Path "$BinDir/_internal") { Remove-Item "$BinDir/_internal" -Recurse -Force }
-          if (Test-Path "$BinDir/$SidecarExe") { Remove-Item "$BinDir/$SidecarExe" -Force }
-          Copy-Item "$DistDir/_internal" "$BinDir" -Recurse
-          Copy-Item "$DistDir/huge_sidecar.exe" "$BinDir/$SidecarExe"
-
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build Tauri (Full)
+      - name: Build Tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -124,121 +97,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --config '{"bundle":{"identifier":"com.wangh.hugescreenshot.full"}}'
-
-      - name: Rename artifacts (add 'full' suffix)
-        shell: pwsh
-        run: |
-          $version = "${{ needs.create-release.outputs.version }}"
-          $targetDir = "src-tauri/target/release/bundle"
-          
-          # MSI
-          Get-ChildItem "$targetDir/msi/*.msi" | ForEach-Object {
-            $newName = $_.Name -replace '\.msi$', '_full.msi'
-            Rename-Item $_.FullName $newName
-          }
-          
-          # NSIS
-          Get-ChildItem "$targetDir/nsis/*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
-            $newName = $_.Name -replace '\.exe$', '_full.exe'
-            Rename-Item $_.FullName $newName
-          }
-
-      - name: Upload Full artifacts
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.create-release.outputs.version }}
-          files: |
-            src-tauri/target/release/bundle/msi/*_full.msi
-            src-tauri/target/release/bundle/msi/*_full.msi.sig
-            src-tauri/target/release/bundle/nsis/*_full.exe
-            src-tauri/target/release/bundle/nsis/*_full.exe.sig
-
-  # ============================================
-  # Windows 构建 - 精简版 (纯 Rust，无 Python)
-  # ============================================
-  build-windows-lite:
-    name: Build Windows (Lite)
-    needs: create-release
-    runs-on: windows-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-          prefix-key: lite
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 'lts/*'
-          cache: 'npm'
-
-      - name: Remove Sidecar dependency (Lite build)
-        shell: pwsh
-        run: |
-          # 从 tauri.conf.json 中移除 externalBin
-          $confPath = "src-tauri/tauri.conf.json"
-          $conf = Get-Content $confPath -Raw | ConvertFrom-Json
-          $conf.bundle.externalBin = @()
-          $conf | ConvertTo-Json -Depth 10 | Set-Content $confPath -Encoding UTF8
-          
-          Write-Host "Removed externalBin from tauri.conf.json for Lite build"
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Build Tauri (Lite)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_PRIVATE_KEY_PASSWORD }}
-        with:
-          releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --config '{"bundle":{"identifier":"com.wangh.hugescreenshot.lite"}}'
-
-      - name: Rename artifacts (add 'lite' suffix)
-        shell: pwsh
-        run: |
-          $version = "${{ needs.create-release.outputs.version }}"
-          $targetDir = "src-tauri/target/release/bundle"
-          
-          # MSI
-          Get-ChildItem "$targetDir/msi/*.msi" | ForEach-Object {
-            $newName = $_.Name -replace '\.msi$', '_lite.msi'
-            Rename-Item $_.FullName $newName
-          }
-          
-          # NSIS
-          Get-ChildItem "$targetDir/nsis/*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
-            $newName = $_.Name -replace '\.exe$', '_lite.exe'
-            Rename-Item $_.FullName $newName
-          }
-
-      - name: Upload Lite artifacts
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.create-release.outputs.version }}
-          files: |
-            src-tauri/target/release/bundle/msi/*_lite.msi
-            src-tauri/target/release/bundle/msi/*_lite.msi.sig
-            src-tauri/target/release/bundle/nsis/*_lite.exe
-            src-tauri/target/release/bundle/nsis/*_lite.exe.sig
 
   # ============================================
   # 发布 Release
   # ============================================
   publish-release:
     name: Publish Release
-    needs: [create-release, build-windows-full, build-windows-lite]
+    needs: [create-release, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write

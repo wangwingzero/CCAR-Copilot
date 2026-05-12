@@ -1,0 +1,20 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "ccar-update"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Worker 启动时可读的环境变量
+#
+# ORIGIN   源站基址,回源时会把 `/latest.json`、`/downloads/*` 拼到 ORIGIN 后面。
+# LATEST_TTL  `/latest.json` 的边缘缓存秒数(发新版后需要 Purge 或等它过期)。
+# ARTIFACT_TTL  `/downloads/*` 的边缘缓存秒数,由于文件名含版本号可以给长一点。
+[vars]
+ORIGIN = "https://ccar-dl.hudawang.cn"
+LATEST_TTL = "60"
+ARTIFACT_TTL = "86400"
+
+# 绑定自定义域名路由(需要先在 Cloudflare DNS 里把 ccar-update.031986.xyz
+# 指向一条代理开启的记录,例如 CNAME 到 workers.dev)
+[[routes]]
+pattern = "ccar-update.031986.xyz/*"
+zone_name = "031986.xyz"
