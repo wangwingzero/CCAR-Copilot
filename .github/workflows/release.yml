@@ -1,12 +1,15 @@
 # Release 工作流 - 构建并发布 CCAR Copilot
-# 当推送 v* 标签时触发
+# 暂时仅手动触发，避免推送 tag 后自动在 GitHub 上构建
 
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号，例如 0.1.10'
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,14 +29,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get version from tag
+      - name: Get version
         id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          VERSION="${VERSION#v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.get_version.outputs.VERSION }}
           name: CCAR Copilot v${{ steps.get_version.outputs.VERSION }}
           draft: true
           prerelease: false

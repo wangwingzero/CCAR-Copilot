@@ -1,13 +1,10 @@
 # CI 工作流 - 测试和代码检查
-# 每次 push 和 PR 触发
+# 暂时仅手动触发，避免普通 push 自动在 GitHub 上构建
 
 name: CI
 
 on:
-  push:
-    branches: [main, master, dev]
-  pull_request:
-    branches: [main, master]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
