@@ -490,6 +490,95 @@ pub fn get_pending_ocr_files(
     Ok(files)
 }
 
+fn normalize_scope_path(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn normalized_scan_folders(scan_folders: &[String]) -> Vec<String> {
+    scan_folders
+        .iter()
+        .map(|folder| normalize_scope_path(folder))
+        .filter(|folder| !folder.is_empty())
+        .collect()
+}
+
+pub fn is_file_path_in_scan_folders(file_path: &str, scan_folders: &[String]) -> bool {
+    let folders = normalized_scan_folders(scan_folders);
+    if folders.is_empty() {
+        return true;
+    }
+
+    let path = normalize_scope_path(file_path);
+    folders.iter().any(|folder| path == *folder || path.starts_with(&format!("{}/", folder)))
+}
+
+/// 获取指定扫描目录内的待 OCR 文件列表。
+///
+/// 空目录列表表示不限制范围，保持旧行为。
+pub fn get_pending_ocr_files_in_folders(
+    conn: &rusqlite::Connection,
+    limit: usize,
+    scan_folders: &[String],
+) -> HuGeResult<Vec<RegulationFile>> {
+    if normalized_scan_folders(scan_folders).is_empty() {
+        return get_pending_ocr_files(conn, limit);
+    }
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, title, doc_number, doc_type, validity, office_unit, sign_date, publish_date,
+               url, pdf_url, sha256, file_path,
+               file_size, page_count, ocr_status, ocr_progress, ocr_current_page,
+               ocr_error, indexed, indexed_at, created_at, updated_at, ocr_engine
+        FROM regulation_files
+        WHERE ocr_status = 'pending'
+        ORDER BY created_at ASC
+        "#,
+    )?;
+
+    let mut files = Vec::new();
+    for row in stmt.query_map([], |row| {
+        Ok(RegulationFile {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            doc_number: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            doc_type: row.get(3)?,
+            validity: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            office_unit: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            sign_date: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+            publish_date: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+            url: row.get(8)?,
+            pdf_url: row.get(9)?,
+            sha256: row.get(10)?,
+            file_path: row.get(11)?,
+            file_size: row.get(12)?,
+            page_count: row.get(13)?,
+            ocr_status: row.get(14)?,
+            ocr_progress: row.get(15)?,
+            ocr_current_page: row.get(16)?,
+            ocr_error: row.get(17)?,
+            indexed: row.get::<_, i32>(18)? != 0,
+            indexed_at: row.get(19)?,
+            created_at: row.get(20)?,
+            updated_at: row.get(21)?,
+            ocr_engine: row.get::<_, Option<String>>(22)?.unwrap_or_else(|| "unknown".to_string()),
+        })
+    })? {
+        let file = row?;
+        if is_file_path_in_scan_folders(&file.file_path, scan_folders) {
+            files.push(file);
+            if files.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(files)
+}
+
 /// 重置失败的 OCR 文件状态为 pending（用于重试）
 ///
 /// 返回重置的文件数量
@@ -505,6 +594,50 @@ pub fn reset_failed_ocr_files(conn: &rusqlite::Connection) -> HuGeResult<usize> 
     )?;
 
     tracing::info!("重置 {} 个失败的 OCR 文件为 pending 状态", count);
+    Ok(count)
+}
+
+pub fn reset_failed_ocr_files_in_folders(
+    conn: &rusqlite::Connection,
+    scan_folders: &[String],
+) -> HuGeResult<usize> {
+    if normalized_scan_folders(scan_folders).is_empty() {
+        return reset_failed_ocr_files(conn);
+    }
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, file_path
+        FROM regulation_files
+        WHERE ocr_status = 'failed'
+        "#,
+    )?;
+
+    let ids: Vec<i64> = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+        .filter_map(|row| row.ok())
+        .filter_map(|(id, file_path)| {
+            is_file_path_in_scan_folders(&file_path, scan_folders).then_some(id)
+        })
+        .collect();
+
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let placeholders: String = std::iter::repeat("?").take(ids.len()).collect::<Vec<_>>().join(",");
+    let update_sql = format!(
+        "UPDATE regulation_files \
+         SET ocr_status = 'pending', ocr_error = NULL, ocr_progress = 0, \
+             ocr_current_page = 0, updated_at = CURRENT_TIMESTAMP \
+         WHERE id IN ({})",
+        placeholders
+    );
+    let params_vec: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let count = conn.execute(&update_sql, params_vec.as_slice())?;
+
+    tracing::info!("按扫描目录重置 {} 个失败的 OCR 文件为 pending 状态", count);
     Ok(count)
 }
 
@@ -575,6 +708,53 @@ pub fn get_sync_status(conn: &rusqlite::Connection) -> HuGeResult<SyncStatus> {
         failed_ocr: failed,
         indexed,
     })
+}
+
+/// 获取指定扫描目录内的同步状态统计。
+///
+/// 空目录列表表示不限制范围，保持旧行为。
+pub fn get_sync_status_in_folders(
+    conn: &rusqlite::Connection,
+    scan_folders: &[String],
+) -> HuGeResult<SyncStatus> {
+    if normalized_scan_folders(scan_folders).is_empty() {
+        return get_sync_status(conn);
+    }
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT file_path, ocr_status, indexed
+        FROM regulation_files
+        "#,
+    )?;
+
+    let mut status = SyncStatus::default();
+    for row in stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i32>(2)? != 0,
+        ))
+    })? {
+        let (file_path, ocr_status, indexed) = row?;
+        if !is_file_path_in_scan_folders(&file_path, scan_folders) {
+            continue;
+        }
+
+        status.total_files += 1;
+        match ocr_status.as_str() {
+            "pending" => status.pending_ocr += 1,
+            "processing" => status.processing_ocr += 1,
+            "done" => status.done_ocr += 1,
+            "failed" => status.failed_ocr += 1,
+            _ => {}
+        }
+        if indexed {
+            status.indexed += 1;
+        }
+    }
+
+    Ok(status)
 }
 
 /// 获取所有已完成 OCR 但未入索引的文件
@@ -766,6 +946,65 @@ mod tests {
         let status = get_sync_status(&conn).unwrap();
         assert_eq!(status.total_files, 1);
         assert_eq!(status.pending_ocr, 1);
+    }
+
+    #[test]
+    fn test_sync_status_in_folders_excludes_outside_paths() {
+        let conn = setup_test_db();
+
+        let inside = RegulationFile {
+            title: "inside".to_string(),
+            url: "https://example.com/inside.pdf".to_string(),
+            sha256: "inside-hash".to_string(),
+            file_path: r"D:\飞行手册\局方\CCAR规章\inside.pdf".to_string(),
+            ocr_status: "pending".to_string(),
+            ..Default::default()
+        };
+        insert_file(&conn, &inside).unwrap();
+
+        let outside = RegulationFile {
+            title: "outside".to_string(),
+            url: "https://example.com/outside.pdf".to_string(),
+            sha256: "outside-hash".to_string(),
+            file_path: r"D:\其他目录\outside.pdf".to_string(),
+            ocr_status: "failed".to_string(),
+            ..Default::default()
+        };
+        insert_file(&conn, &outside).unwrap();
+
+        let status = get_sync_status_in_folders(&conn, &[r"D:\飞行手册\局方".to_string()]).unwrap();
+        assert_eq!(status.total_files, 1);
+        assert_eq!(status.pending_ocr, 1);
+        assert_eq!(status.failed_ocr, 0);
+    }
+
+    #[test]
+    fn test_pending_ocr_files_in_folders_excludes_similar_prefixes() {
+        let conn = setup_test_db();
+
+        let inside = RegulationFile {
+            title: "inside".to_string(),
+            url: "https://example.com/inside.pdf".to_string(),
+            sha256: "inside-hash".to_string(),
+            file_path: r"D:\Regs\CCAR规章\inside.pdf".to_string(),
+            ocr_status: "pending".to_string(),
+            ..Default::default()
+        };
+        insert_file(&conn, &inside).unwrap();
+
+        let similar_prefix = RegulationFile {
+            title: "similar".to_string(),
+            url: "https://example.com/similar.pdf".to_string(),
+            sha256: "similar-hash".to_string(),
+            file_path: r"D:\Regs-old\similar.pdf".to_string(),
+            ocr_status: "pending".to_string(),
+            ..Default::default()
+        };
+        insert_file(&conn, &similar_prefix).unwrap();
+
+        let pending = get_pending_ocr_files_in_folders(&conn, 10, &[r"D:\Regs".to_string()]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].title, "inside");
     }
 
     #[test]

@@ -9,6 +9,7 @@
 import { ref, computed, inject, onMounted, watch } from 'vue'
 import { useRegulationQuery, type DateFilter } from '@/composables/useRegulationQuery'
 import { useToast } from '@/composables/useToast'
+import { useSettingsStore } from '@/stores/settings'
 // Store 状态统一通过 useRegulationQuery composable 访问，不再直接导入 store
 import type { RegulationDocument, RegulationDocType, RegulationValidity } from '@/types'
 import { invoke } from '@tauri-apps/api/core'
@@ -185,7 +186,7 @@ const {
   cancelOcrProcessing,
   syncCompare,
   cancelSyncCompare,
-  refreshDbStatus,
+  refreshDbStatus: refreshDbStatusForFolders,
   dbSyncStatus,
   scanLocalDir,
   setDocType,
@@ -196,6 +197,7 @@ const {
 } = useRegulationQuery()
 
 const { toast, showToast, hideToast } = useToast()
+const settingsStore = useSettingsStore()
 
 async function copySyncCommand(): Promise<void> {
   try {
@@ -384,7 +386,18 @@ const isScanningSelectedFolders = ref(false)
 const currentScanFolder = ref('')
 const showMaintenanceMenu = ref(false)
 
-watch(scanFolders, folders => saveScanFolders(folders), { deep: true })
+watch(
+  scanFolders,
+  folders => {
+    saveScanFolders(folders)
+    void refreshDbStatusForFolders([...folders])
+  },
+  { deep: true }
+)
+
+async function refreshDbStatus(): Promise<void> {
+  await refreshDbStatusForFolders([...scanFolders.value])
+}
 
 // 状态统一通过 useRegulationQuery composable 获取（已在上方解构）
 
@@ -480,6 +493,7 @@ onMounted(async () => {
   if (searchState.dateFilter === 'custom') {
     showCustomDatePicker.value = true
   }
+  await configureManagedRegulationRoot(scanFolders.value[0])
   await initLocalIndex()
   await refreshDbStatus()
 
@@ -510,6 +524,7 @@ onMounted(async () => {
 async function startBackgroundOcrQueue(reason: string): Promise<void> {
   if (isProcessingFiles.value || isAutoOcrRunning.value) return
 
+  const scopedScanFolders = [...scanFolders.value]
   let pending = 0
   try {
     await refreshDbStatus()
@@ -544,10 +559,14 @@ async function startBackgroundOcrQueue(reason: string): Promise<void> {
       const batchSize = Math.min(AUTO_OCR_BATCH_SIZE, remaining)
       processingProgressText.value = `后台 OCR 识别中：本批 ${batchSize} 个，剩余约 ${remaining} 个`
 
-      const result = await ocrPendingFiles(batchSize, (current, done, total) => {
-        const currentName = current ? `：${current}` : ''
-        processingProgressText.value = `后台 OCR ${done}/${total}，剩余约 ${remaining} 个${currentName}`
-      })
+      const result = await ocrPendingFiles(
+        batchSize,
+        (current, done, total) => {
+          const currentName = current ? `：${current}` : ''
+          processingProgressText.value = `后台 OCR ${done}/${total}，剩余约 ${remaining} 个${currentName}`
+        },
+        scopedScanFolders
+      )
 
       if (result.cancelled || isOcrCancelRequested.value) {
         wasCancelled = true
@@ -740,7 +759,7 @@ async function handleBatchDownload(): Promise<void> {
     return
   }
 
-  const { success, skipped, failed } = await downloadBatchNative(selectedList)
+  const { success, skipped, failed } = await downloadBatchNative(selectedList, [...scanFolders.value])
   showToast(
     `下载完成：成功 ${success} 个，跳过 ${skipped} 个，失败 ${failed} 个`,
     failed > 0 ? 'error' : 'success'
@@ -760,7 +779,8 @@ async function handleProcessPending(): Promise<void> {
   processResult.value = null
 
   try {
-    const result = await processPendingFiles(20)
+    const scopedScanFolders = [...scanFolders.value]
+    const result = await processPendingFiles(20, scopedScanFolders)
     processResult.value = result
     if (result.processed === 0) {
       showToast('没有待处理的文件', 'info')
@@ -772,9 +792,13 @@ async function handleProcessPending(): Promise<void> {
       processingStage.value = 'ocr'
       processingProgressText.value = `准备 OCR ${result.needs_ocr} 个文件`
 
-      const ocrResult = await ocrPendingFiles(result.needs_ocr, (current, done, total) => {
-        processingProgressText.value = `${done}/${total} ${current}`
-      })
+      const ocrResult = await ocrPendingFiles(
+        result.needs_ocr,
+        (current, done, total) => {
+          processingProgressText.value = `${done}/${total} ${current}`
+        },
+        scopedScanFolders
+      )
 
       if (ocrResult.cancelled || isOcrCancelRequested.value) {
         showToast('OCR 已中止，未处理的文件会保留在待 OCR 队列', 'info')
@@ -855,7 +879,9 @@ async function openRequeueDialog(): Promise<void> {
       scanOnly: number
       nonMineru: number
       totalDone: number
-    }>('regulation_ocr_engine_stats')
+    }>('regulation_ocr_engine_stats', {
+      scanFolders: [...scanFolders.value],
+    })
     ocrEngineStats.value = stats
     // 默认选中：优先 scan_only（= pp_ocrv4 + unknown，不含 pdfium）
     // 表象依据：pdfium 重跑无质量提升，不应被默认勾选
@@ -922,7 +948,7 @@ async function confirmRequeue(): Promise<void> {
       resetToPending: number
       sampleTitles: string[]
     }>('regulation_requeue_ocr_by_engine', {
-      filter: { scope: requeueScope.value },
+      filter: { scope: requeueScope.value, scanFolders: [...scanFolders.value] },
     })
 
     if (result.candidateCount === 0) {
@@ -956,7 +982,9 @@ async function handleRetryFailedOcr(): Promise<void> {
       ocr_success: number
       ocr_failed: number
       skipped: number
-    }>('regulation_retry_failed_ocr')
+    }>('regulation_retry_failed_ocr', {
+      scanFolders: [...scanFolders.value],
+    })
 
     if (result.processed === 0) {
       showToast('没有失败的 OCR 文件需要重试', 'info')
@@ -1141,6 +1169,7 @@ async function handleAddScanFolder(): Promise<void> {
     scanFolders.value = nextFolders
 
     if (newlyAdded.length > 0) {
+      await configureManagedRegulationRoot(nextFolders[0])
       showToast(`已添加 ${newlyAdded.length} 个文件夹，开始扫描...`, 'success')
       await scanFolderQueue(newlyAdded)
     } else {
@@ -1149,6 +1178,21 @@ async function handleAddScanFolder(): Promise<void> {
   } catch (err) {
     showToast(`选择文件夹失败: ${err}`, 'error')
   }
+}
+
+async function configureManagedRegulationRoot(folder: string | undefined): Promise<void> {
+  if (!folder) return
+
+  if (!settingsStore.isLoaded) {
+    await settingsStore.loadConfig()
+  }
+
+  if (settingsStore.advanced.regulationStoragePath !== folder) {
+    settingsStore.updateAdvanced({ regulationStoragePath: folder })
+    await settingsStore.saveConfig()
+  }
+
+  await invoke('regulation_prepare_storage_dirs')
 }
 
 function handleRemoveScanFolder(folder: string): void {
@@ -1697,9 +1741,9 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
           @click="openRequeueDialog"
         >
           <span class="maint-name">{{
-            isRequeueingForMineru ? '重置中...' : '重做 OCR (MinerU)'
+            isRequeueingForMineru ? '重置中...' : '重做扫描件 OCR（优先 MinerU）'
           }}</span>
-          <span class="maint-desc">按引擎筛选范围(pp_ocrv4 / pdfium / unknown 等)重新 OCR</span>
+          <span class="maint-desc">默认只重置扫描件范围，之后走主 OCR 队列</span>
         </button>
         <button
           v-if="(dbSyncStatus?.failed_ocr ?? 0) > 0"

@@ -113,6 +113,8 @@ export const useRegulationStore = defineStore('regulation', () => {
         {
           dirPath,
           recursive,
+          localCopyMode: 'register_only',
+          targetDir: dirPath,
         },
       )
 
@@ -189,7 +191,7 @@ export const useRegulationStore = defineStore('regulation', () => {
   /**
    * 刷新数据库同步状态
    */
-  async function refreshDbStatus(): Promise<void> {
+  async function refreshDbStatus(scanFolders: string[] = []): Promise<void> {
     try {
       const status = await invoke<{
         total_files: number
@@ -198,7 +200,9 @@ export const useRegulationStore = defineStore('regulation', () => {
         done_ocr: number
         failed_ocr: number
         indexed: number
-      }>('regulation_get_sync_status')
+      }>('regulation_get_sync_status', {
+        scanFolders,
+      })
 
       dbSyncStatus.value = status
     } catch (err) {

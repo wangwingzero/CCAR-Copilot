@@ -94,6 +94,19 @@ impl LocalCopyMode {
     }
 }
 
+fn should_skip_local_file_as_duplicate(
+    copy_mode: LocalCopyMode,
+    path_exists: bool,
+    hash_exists: bool,
+) -> bool {
+    match copy_mode {
+        // 本地文件夹注册模式下，路径才是用户正在搜索的对象。同一个 PDF 内容如果位于
+        // 新文件夹路径，也要入库并先支持文件名搜索。
+        LocalCopyMode::RegisterOnly => path_exists,
+        LocalCopyMode::CopyThenRegister => path_exists || hash_exists,
+    }
+}
+
 fn resolve_target_dir<R: tauri::Runtime>(
     app: &AppHandle<R>,
     target_dir: Option<&str>,
@@ -375,8 +388,7 @@ pub async fn regulation_local_search(
     let scan_folder_filter = normalize_scan_folder_filters(&request.scan_folders);
     let has_scan_folder_filter = !scan_folder_filter.is_empty();
     let needs_validity_post_filter = matches!(request.validity.as_str(), "valid" | "invalid");
-    let needs_post_filter =
-        needs_validity_post_filter || has_date_filter || has_scan_folder_filter;
+    let needs_post_filter = needs_validity_post_filter || has_date_filter || has_scan_folder_filter;
 
     let mut results = if needs_post_filter {
         let expanded_limit = if has_scan_folder_filter {
@@ -413,9 +425,8 @@ pub async fn regulation_local_search(
         }
 
         if has_scan_folder_filter {
-            candidates.retain(|doc| {
-                is_document_in_normalized_scan_folders(doc, &scan_folder_filter)
-            });
+            candidates
+                .retain(|doc| is_document_in_normalized_scan_folders(doc, &scan_folder_filter));
         }
 
         candidates.truncate(request.limit);
@@ -1107,6 +1118,7 @@ pub async fn regulation_get_download_progress(
 #[tauri::command]
 pub async fn regulation_get_sync_status<R: tauri::Runtime>(
     app: AppHandle<R>,
+    scan_folders: Option<Vec<String>>,
 ) -> Result<SyncStatus, String> {
     // 获取数据库路径
     let app_data_dir =
@@ -1122,7 +1134,9 @@ pub async fn regulation_get_sync_status<R: tauri::Runtime>(
     regulation_db::init_regulation_schema(&conn).map_err(|e| format!("初始化规章表失败: {}", e))?;
 
     // 获取统计信息
-    regulation_db::get_sync_status(&conn).map_err(|e| format!("获取同步状态失败: {}", e))
+    let folders = scan_folders.unwrap_or_default();
+    regulation_db::get_sync_status_in_folders(&conn, &folders)
+        .map_err(|e| format!("获取同步状态失败: {}", e))
 }
 
 // ============================================================================
@@ -1150,6 +1164,7 @@ pub struct ProcessFilesResponse {
 pub async fn regulation_process_pending<R: tauri::Runtime>(
     app: AppHandle<R>,
     batch_size: Option<usize>,
+    scan_folders: Option<Vec<String>>,
     index_state: State<'_, RegulationIndexState>,
 ) -> Result<ProcessFilesResponse, String> {
     let batch_size = batch_size.unwrap_or(10);
@@ -1167,7 +1182,8 @@ pub async fn regulation_process_pending<R: tauri::Runtime>(
     regulation_db::init_regulation_schema(&conn).map_err(|e| format!("初始化规章表失败: {}", e))?;
 
     // 获取待处理文件
-    let pending_files = regulation_db::get_pending_ocr_files(&conn, batch_size)
+    let folders = scan_folders.unwrap_or_default();
+    let pending_files = regulation_db::get_pending_ocr_files_in_folders(&conn, batch_size, &folders)
         .map_err(|e| format!("获取待处理文件失败: {}", e))?;
 
     if pending_files.is_empty() {
@@ -1210,14 +1226,10 @@ pub async fn regulation_process_pending<R: tauri::Runtime>(
                     let state_guard =
                         index_state.index.lock().map_err(|e| format!("锁定索引状态失败: {}", e))?;
                     if let Some(index) = state_guard.as_ref() {
-                        if !index.exists(&doc.url) {
-                            index
-                                .add_document(&doc)
-                                .and_then(|_| index.commit())
-                                .map_err(|e| format!("写入索引失败: {}", e))
-                        } else {
-                            Ok(())
-                        }
+                        index
+                            .upsert_document(&doc)
+                            .and_then(|_| index.commit())
+                            .map_err(|e| format!("写入索引失败: {}", e))
                     } else {
                         Err("索引未初始化".to_string())
                     }
@@ -1632,6 +1644,13 @@ async fn ocr_single_file_with_online_fallback<R: tauri::Runtime>(
     }
 }
 
+struct LocalIndexCandidate {
+    file_id: i64,
+    document: super::schema::RegulationDocument,
+    /// true 表示已经提取到可用正文，false 表示只先让标题/文件名可搜索。
+    text_ready: bool,
+}
+
 /// 处理本地法规文件列表：去重、文本提取、入库、入索引
 ///
 /// 返回 `(new_files, duplicates, indexed, needs_ocr, failed)`
@@ -1689,8 +1708,10 @@ fn process_local_file_batch<R: tauri::Runtime>(
             }
         }
 
-        // RegisterOnly 模式按路径去重
-        if copy_mode == LocalCopyMode::RegisterOnly && existing_paths.contains(&file_path_str) {
+        let path_exists = existing_paths.contains(&file_path_str);
+
+        // RegisterOnly 模式按路径去重；CopyThenRegister 模式还要按内容哈希去重。
+        if should_skip_local_file_as_duplicate(copy_mode, path_exists, false) {
             duplicates += 1;
             continue;
         }
@@ -1705,8 +1726,11 @@ fn process_local_file_batch<R: tauri::Runtime>(
             }
         };
 
-        // 哈希去重
-        if existing_hashes.contains(&sha256) {
+        let hash_exists = existing_hashes.contains(&sha256);
+
+        // 哈希去重只适用于复制归档模式。本地注册模式要允许相同内容的新路径入库，
+        // 否则用户选定的扫描文件夹会没有任何可搜索记录。
+        if should_skip_local_file_as_duplicate(copy_mode, false, hash_exists) {
             duplicates += 1;
             continue;
         }
@@ -1747,7 +1771,9 @@ fn process_local_file_batch<R: tauri::Runtime>(
             }
         } else if is_pdf {
             match text_extractor::extract_text_from_pdf(&stored_path) {
-                Ok(extraction) if !extraction.needs_ocr => (extraction.text, "done", false, "pdfium"),
+                Ok(extraction) if !extraction.needs_ocr => {
+                    (extraction.text, "done", false, "pdfium")
+                }
                 Ok(extraction) => (extraction.text, "pending", true, "unknown"),
                 Err(e) => {
                     debug!("文本提取失败: {} - {}", filename, e);
@@ -1783,22 +1809,31 @@ fn process_local_file_batch<R: tauri::Runtime>(
         match regulation_db::insert_file(conn, &db_file) {
             Ok(file_id) => {
                 new_files += 1;
+                let reg_doc = super::schema::RegulationDocument {
+                    title,
+                    doc_number,
+                    validity,
+                    doc_type,
+                    office_unit: String::new(),
+                    sign_date: String::new(),
+                    publish_date: String::new(),
+                    url: file_url,
+                    file_path: stored_path_str,
+                    content,
+                };
                 if !text_needs_ocr {
-                    let reg_doc = super::schema::RegulationDocument {
-                        title,
-                        doc_number,
-                        validity,
-                        doc_type,
-                        office_unit: String::new(),
-                        sign_date: String::new(),
-                        publish_date: String::new(),
-                        url: file_url,
-                        file_path: stored_path_str,
-                        content,
-                    };
-                    batch_docs.push((file_id, reg_doc));
+                    batch_docs.push(LocalIndexCandidate {
+                        file_id,
+                        document: reg_doc,
+                        text_ready: true,
+                    });
                     indexed += 1;
                 } else {
+                    batch_docs.push(LocalIndexCandidate {
+                        file_id,
+                        document: reg_doc,
+                        text_ready: false,
+                    });
                     needs_ocr += 1;
                 }
             }
@@ -2124,9 +2159,7 @@ fn is_document_in_normalized_scan_folders(
         if folder.ends_with('\\') {
             file_path.starts_with(folder)
         } else {
-            file_path
-                .strip_prefix(folder.as_str())
-                .is_some_and(|rest| rest.starts_with('\\'))
+            file_path.strip_prefix(folder.as_str()).is_some_and(|rest| rest.starts_with('\\'))
         }
     })
 }
@@ -3074,6 +3107,7 @@ pub struct OcrProcessResponse {
 pub async fn regulation_ocr_pending<R: tauri::Runtime>(
     app: AppHandle<R>,
     batch_size: Option<usize>,
+    scan_folders: Option<Vec<String>>,
     index_state: State<'_, RegulationIndexState>,
     cancel_state: State<'_, RegulationTaskCancelState>,
 ) -> Result<OcrProcessResponse, String> {
@@ -3085,7 +3119,8 @@ pub async fn regulation_ocr_pending<R: tauri::Runtime>(
     let pending_files = {
         let (conn, _, _) = open_db_and_load_dedup_data(&app)?;
         let _ = regulation_db::reset_stale_processing_ocr_files(&conn, 30);
-        regulation_db::get_pending_ocr_files(&conn, batch_size)
+        let folders = scan_folders.clone().unwrap_or_default();
+        regulation_db::get_pending_ocr_files_in_folders(&conn, batch_size, &folders)
             .map_err(|e| format!("获取待 OCR 文件失败: {}", e))?
     };
 
@@ -3173,6 +3208,7 @@ pub async fn regulation_cancel_ocr(
 #[tauri::command]
 pub async fn regulation_retry_failed_ocr<R: tauri::Runtime>(
     app: AppHandle<R>,
+    scan_folders: Option<Vec<String>>,
     index_state: State<'_, RegulationIndexState>,
     cancel_state: State<'_, RegulationTaskCancelState>,
 ) -> Result<OcrProcessResponse, String> {
@@ -3181,7 +3217,8 @@ pub async fn regulation_retry_failed_ocr<R: tauri::Runtime>(
     let (conn, _, _) = open_db_and_load_dedup_data(&app)?;
 
     // 重置 failed → pending
-    let reset_count = regulation_db::reset_failed_ocr_files(&conn)
+    let folders = scan_folders.clone().unwrap_or_default();
+    let reset_count = regulation_db::reset_failed_ocr_files_in_folders(&conn, &folders)
         .map_err(|e| format!("重置失败文件状态失败: {}", e))?;
 
     if reset_count == 0 {
@@ -3193,7 +3230,7 @@ pub async fn regulation_retry_failed_ocr<R: tauri::Runtime>(
     drop(conn);
 
     // 调用已有的 OCR 处理逻辑
-    regulation_ocr_pending(app, Some(reset_count), index_state, cancel_state).await
+    regulation_ocr_pending(app, Some(reset_count), scan_folders, index_state, cancel_state).await
 }
 
 /// 重置候选记录的响应
@@ -3225,43 +3262,47 @@ pub struct OcrEngineStats {
 #[tauri::command]
 pub async fn regulation_ocr_engine_stats<R: tauri::Runtime>(
     app: AppHandle<R>,
+    scan_folders: Option<Vec<String>>,
 ) -> Result<OcrEngineStats, String> {
     let conn = open_regulation_db(&app)?;
+    let folders = scan_folders.unwrap_or_default();
 
-    let count_for = |engine: &str| -> Result<i64, String> {
-        conn.query_row(
-            "SELECT COUNT(*) FROM regulation_files \
-             WHERE ocr_status = 'done' AND ocr_engine = ?1",
-            rusqlite::params![engine],
-            |row| row.get::<_, i64>(0),
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(ocr_engine, 'unknown'), file_path \
+             FROM regulation_files WHERE ocr_status = 'done'",
         )
-        .map_err(|e| format!("统计 {} 失败: {}", engine, e))
-    };
+        .map_err(|e| format!("准备 OCR 引擎统计失败: {}", e))?;
 
-    let pdfium = count_for("pdfium")?;
-    let pp_ocrv4 = count_for("pp_ocrv4")?;
-    let mineru = count_for("mineru")?;
-    let unknown = count_for("unknown")?;
-    let total_done: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM regulation_files WHERE ocr_status = 'done'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("统计 total_done 失败: {}", e))?;
+    let mut pdfium = 0_i64;
+    let mut pp_ocrv4 = 0_i64;
+    let mut mineru = 0_i64;
+    let mut unknown = 0_i64;
+    let mut total_done = 0_i64;
+
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| format!("查询 OCR 引擎统计失败: {}", e))?;
+
+    for row in rows {
+        let (engine, file_path) = row.map_err(|e| format!("读取 OCR 引擎统计失败: {}", e))?;
+        if !regulation_db::is_file_path_in_scan_folders(&file_path, &folders) {
+            continue;
+        }
+        total_done += 1;
+        match engine.as_str() {
+            "pdfium" => pdfium += 1,
+            "pp_ocrv4" => pp_ocrv4 += 1,
+            "mineru" => mineru += 1,
+            "unknown" => unknown += 1,
+            _ => {}
+        }
+    }
 
     let non_mineru = total_done - mineru;
     let scan_only = pp_ocrv4 + unknown;
 
-    Ok(OcrEngineStats {
-        pdfium,
-        pp_ocrv4,
-        mineru,
-        unknown,
-        scan_only,
-        non_mineru,
-        total_done,
-    })
+    Ok(OcrEngineStats { pdfium, pp_ocrv4, mineru, unknown, scan_only, non_mineru, total_done })
 }
 
 /// 重置筛选范围：按 OCR 引擎
@@ -3270,6 +3311,8 @@ pub async fn regulation_ocr_engine_stats<R: tauri::Runtime>(
 pub struct RequeueOcrFilter {
     /// 指定引擎重做：支持 `scan_only` / `pp_ocrv4` / `pdfium` / `unknown` / `non_mineru` / `all_done`
     pub scope: String,
+    /// 限定到用户选择的扫描根目录；为空则保持旧的全库行为
+    pub scan_folders: Option<Vec<String>>,
 }
 
 /// 找出指定范围的 OCR 记录，从 Tantivy 索引删除并重置 `ocr_status = 'pending'`，
@@ -3296,36 +3339,38 @@ pub async fn regulation_requeue_ocr_by_engine<R: tauri::Runtime>(
 
     // 根据 scope 构造 WHERE 条件
     let where_clause = match filter.scope.as_str() {
-        "scan_only" => {
-            "ocr_status = 'done' AND ocr_engine IN ('pp_ocrv4', 'unknown')".to_string()
-        }
+        "scan_only" => "ocr_status = 'done' AND ocr_engine IN ('pp_ocrv4', 'unknown')".to_string(),
         "pp_ocrv4" => "ocr_status = 'done' AND ocr_engine = 'pp_ocrv4'".to_string(),
         "pdfium" => "ocr_status = 'done' AND ocr_engine = 'pdfium'".to_string(),
         "unknown" => "ocr_status = 'done' AND ocr_engine = 'unknown'".to_string(),
-        "non_mineru" => {
-            "ocr_status = 'done' AND ocr_engine != 'mineru'".to_string()
-        }
+        "non_mineru" => "ocr_status = 'done' AND ocr_engine != 'mineru'".to_string(),
         "all_done" => "ocr_status = 'done'".to_string(),
         other => return Err(format!("不支持的 scope: {}", other)),
     };
 
     // 1. 找候选记录
     let sql = format!(
-        "SELECT id, url, title FROM regulation_files WHERE {} ORDER BY id ASC",
+        "SELECT id, url, title, file_path FROM regulation_files WHERE {} ORDER BY id ASC",
         where_clause
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| format!("准备查询语句失败: {}", e))?;
 
+    let folders = filter.scan_folders.clone().unwrap_or_default();
     let rows: Vec<(i64, String, String)> = stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                row.get::<_, String>(3)?,
             ))
         })
         .map_err(|e| format!("查询候选失败: {}", e))?
         .filter_map(|r| r.ok())
+        .filter_map(|(id, url, title, file_path)| {
+            regulation_db::is_file_path_in_scan_folders(&file_path, &folders)
+                .then_some((id, url, title))
+        })
         .collect();
     drop(stmt);
 
@@ -3353,9 +3398,9 @@ pub async fn regulation_requeue_ocr_by_engine<R: tauri::Runtime>(
     let deleted_from_index = {
         let guard = index_state.index.lock().map_err(|e| format!("锁定索引状态失败: {}", e))?;
         match guard.as_ref() {
-            Some(index) => index
-                .delete_by_urls(&urls)
-                .map_err(|e| format!("从索引删除失败: {}", e))?,
+            Some(index) => {
+                index.delete_by_urls(&urls).map_err(|e| format!("从索引删除失败: {}", e))?
+            }
             None => {
                 warn!("[RequeueOCR] 索引未初始化，跳过 Tantivy 删除");
                 0
@@ -3365,8 +3410,7 @@ pub async fn regulation_requeue_ocr_by_engine<R: tauri::Runtime>(
 
     // 3. 重置数据库状态：done → pending，indexed=0，清掉进度
     //    注意：这里不清除 ocr_engine，保留为原 engine，便于下次重做后 UPDATE
-    let placeholders: String =
-        std::iter::repeat("?").take(ids.len()).collect::<Vec<_>>().join(",");
+    let placeholders: String = std::iter::repeat("?").take(ids.len()).collect::<Vec<_>>().join(",");
     let update_sql = format!(
         "UPDATE regulation_files \
          SET ocr_status = 'pending', indexed = 0, indexed_at = NULL, \
@@ -3387,12 +3431,7 @@ pub async fn regulation_requeue_ocr_by_engine<R: tauri::Runtime>(
         filter.scope, candidate_count, deleted_from_index, reset_to_pending
     );
 
-    Ok(RequeueOcrResponse {
-        candidate_count,
-        deleted_from_index,
-        reset_to_pending,
-        sample_titles,
-    })
+    Ok(RequeueOcrResponse { candidate_count, deleted_from_index, reset_to_pending, sample_titles })
 }
 
 /// 旧版兼容命令：等价于 `regulation_requeue_ocr_by_engine(scope = 'pp_ocrv4')`
@@ -3405,7 +3444,7 @@ pub async fn regulation_requeue_local_ocr_for_mineru<R: tauri::Runtime>(
     regulation_requeue_ocr_by_engine(
         app,
         index_state,
-        RequeueOcrFilter { scope: "pp_ocrv4".to_string() },
+        RequeueOcrFilter { scope: "pp_ocrv4".to_string(), scan_folders: None },
     )
     .await
 }
@@ -3514,9 +3553,9 @@ pub async fn regulation_cleanup_invalid_files<R: tauri::Runtime>(
     let deleted_from_index = {
         let guard = index_state.index.lock().map_err(|e| format!("锁定索引状态失败: {}", e))?;
         match guard.as_ref() {
-            Some(index) => index
-                .delete_by_urls(&invalid_urls)
-                .map_err(|e| format!("从索引删除失败: {}", e))?,
+            Some(index) => {
+                index.delete_by_urls(&invalid_urls).map_err(|e| format!("从索引删除失败: {}", e))?
+            }
             None => {
                 warn!("[CleanupInvalid] 索引未初始化，跳过 Tantivy 删除");
                 0
@@ -3684,11 +3723,8 @@ pub async fn regulation_realign_pdf_filenames<R: tauri::Runtime>(
             Ok(()) => {
                 let new_path_str = new_path.to_string_lossy().to_string();
                 if samples.len() < 5 {
-                    let new_basename = new_path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("?")
-                        .to_string();
+                    let new_basename =
+                        new_path.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string();
                     samples.push(format!("{} -> {}", current_basename, new_basename));
                 }
                 db_updates.push((*id, new_path_str.clone()));
@@ -3712,9 +3748,7 @@ pub async fn regulation_realign_pdf_filenames<R: tauri::Runtime>(
 
     // 批量更新 DB.file_path
     if !db_updates.is_empty() {
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| format!("开启事务失败: {}", e))?;
+        let tx = conn.unchecked_transaction().map_err(|e| format!("开启事务失败: {}", e))?;
         {
             let mut update_stmt = tx
                 .prepare(
@@ -3735,10 +3769,7 @@ pub async fn regulation_realign_pdf_filenames<R: tauri::Runtime>(
     let index_updated = if index_updates.is_empty() {
         0
     } else {
-        let guard = index_state
-            .index
-            .lock()
-            .map_err(|e| format!("锁定索引状态失败: {}", e))?;
+        let guard = index_state.index.lock().map_err(|e| format!("锁定索引状态失败: {}", e))?;
         match guard.as_ref() {
             Some(index) => index
                 .update_file_paths_by_url(&index_updates)
@@ -3789,12 +3820,10 @@ fn write_to_index(
     let state_guard = index_state.index.lock().map_err(|e| format!("锁定索引状态失败: {}", e))?;
 
     if let Some(index) = state_guard.as_ref() {
-        if !index.exists(&doc.url) {
-            index
-                .add_document(&doc)
-                .and_then(|_| index.commit())
-                .map_err(|e| format!("写入索引失败: {}", e))?;
-        }
+        index
+            .upsert_document(&doc)
+            .and_then(|_| index.commit())
+            .map_err(|e| format!("写入索引失败: {}", e))?;
     } else {
         return Err("索引未初始化".to_string());
     }
@@ -3908,12 +3937,10 @@ pub async fn regulation_ocr_update<R: tauri::Runtime>(
     let state_guard = index_state.index.lock().map_err(|e| format!("锁定索引状态失败: {}", e))?;
 
     if let Some(index) = state_guard.as_ref() {
-        if !index.exists(&doc.url) {
-            index
-                .add_document(&doc)
-                .and_then(|_| index.commit())
-                .map_err(|e| format!("写入索引失败: {}", e))?;
-        }
+        index
+            .upsert_document(&doc)
+            .and_then(|_| index.commit())
+            .map_err(|e| format!("写入索引失败: {}", e))?;
     } else {
         return Err("索引未初始化".to_string());
     }
@@ -4000,24 +4027,27 @@ pub async fn regulation_get_ocr_queue<R: tauri::Runtime>(
 
 /// 批量提交文档到 Tantivy 索引
 fn commit_batch_to_index(
-    docs: &[(i64, super::schema::RegulationDocument)],
+    docs: &[LocalIndexCandidate],
     index_state: &State<'_, RegulationIndexState>,
     conn: &rusqlite::Connection,
 ) -> Result<(), String> {
     let state_guard = index_state.index.lock().map_err(|e| format!("锁定索引状态失败: {}", e))?;
 
     if let Some(index) = state_guard.as_ref() {
-        for (file_id, doc) in docs {
-            if !index.exists(&doc.url) {
-                if let Err(e) = index.add_document(doc) {
-                    warn!("添加文档到索引失败: {} - {}", doc.title, e);
+        for candidate in docs {
+            if !index.exists(&candidate.document.url) {
+                if let Err(e) = index.add_document(&candidate.document) {
+                    warn!("添加文档到索引失败: {} - {}", candidate.document.title, e);
                     continue;
                 }
             }
-            // 标记已索引（此路径为 pdfium 直接提取成功）
-            let _ = regulation_db::update_ocr_status(conn, *file_id, "done", 100, 0, None);
-            let _ = regulation_db::update_ocr_engine(conn, *file_id, "pdfium");
-            let _ = regulation_db::mark_indexed(conn, *file_id);
+            if candidate.text_ready {
+                // 标记已索引（此路径为 pdfium / TXT 直接提取成功）
+                let _ =
+                    regulation_db::update_ocr_status(conn, candidate.file_id, "done", 100, 0, None);
+                let _ = regulation_db::update_ocr_engine(conn, candidate.file_id, "pdfium");
+                let _ = regulation_db::mark_indexed(conn, candidate.file_id);
+            }
         }
 
         // 批量提交
@@ -4411,15 +4441,10 @@ pub async fn regulation_check_server_manifest<R: tauri::Runtime>(
         .await
         .map_err(|e| format!("解析 manifest JSON 失败: {}", e))?;
 
-    let server_last_updated = manifest
-        .get("lastUpdated")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let server_total_count = manifest
-        .get("totalCount")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
+    let server_last_updated =
+        manifest.get("lastUpdated").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let server_total_count =
+        manifest.get("totalCount").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
     // 2. 解析本地归档根目录（优先用户配置，否则 AppData/regulations）
     let local_root = if let Some(config) = get_cached_config() {
@@ -4446,10 +4471,7 @@ pub async fn regulation_check_server_manifest<R: tauri::Runtime>(
             match std::fs::read_to_string(&state_path) {
                 Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
                     Ok(state) => (
-                        state
-                            .get("serverLastUpdated")
-                            .and_then(|v| v.as_str())
-                            .map(String::from),
+                        state.get("serverLastUpdated").and_then(|v| v.as_str()).map(String::from),
                         state.get("syncedAt").and_then(|v| v.as_str()).map(String::from),
                         state.get("syncStats").cloned(),
                     ),
@@ -4530,12 +4552,7 @@ fn emit_full_sync_progress<R: tauri::Runtime>(
 ) {
     let _ = app.emit(
         "regulation:full-sync-progress",
-        FullSyncProgress {
-            stage: stage.to_string(),
-            current,
-            total,
-            message: message.to_string(),
-        },
+        FullSyncProgress { stage: stage.to_string(), current, total, message: message.to_string() },
     );
 }
 
@@ -4619,8 +4636,7 @@ fn insert_new_regulation_from_online(
     target: &Path,
     file_size: i64,
 ) -> Result<(), String> {
-    let sha256 =
-        calculate_file_hash(target).map_err(|e| format!("计算文件 hash 失败: {}", e))?;
+    let sha256 = calculate_file_hash(target).map_err(|e| format!("计算文件 hash 失败: {}", e))?;
 
     let file = regulation_db::RegulationFile {
         id: 0,
@@ -4665,9 +4681,7 @@ fn sync_archive_to_desired(
     local_root: &Path,
 ) -> Result<ArchiveSyncStats, String> {
     let mut stmt = conn
-        .prepare(
-            "SELECT id, title, doc_type, validity, file_path FROM regulation_files",
-        )
+        .prepare("SELECT id, title, doc_type, validity, file_path FROM regulation_files")
         .map_err(|e| format!("准备语句失败: {}", e))?;
 
     let rows: Vec<(i64, String, String, String, String)> = stmt
@@ -4796,17 +4810,9 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
             validity: doc.validity,
             doc_number: doc.doc_number,
             doc_type: doc.doc_type,
-            publish_date: if doc.publish_date.is_empty() {
-                None
-            } else {
-                Some(doc.publish_date)
-            },
+            publish_date: if doc.publish_date.is_empty() { None } else { Some(doc.publish_date) },
             sign_date: if doc.sign_date.is_empty() { None } else { Some(doc.sign_date) },
-            office_unit: if doc.office_unit.is_empty() {
-                None
-            } else {
-                Some(doc.office_unit)
-            },
+            office_unit: if doc.office_unit.is_empty() { None } else { Some(doc.office_unit) },
         })
         .collect();
 
@@ -4840,11 +4846,8 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
         } => result?,
         _ = wait_for_cancel(cancel_flag.clone()) => return Err("同步已中止".to_string()),
     };
-    let server_last_updated = manifest
-        .get("lastUpdated")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let server_last_updated =
+        manifest.get("lastUpdated").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let server_total_count =
         manifest.get("totalCount").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
@@ -4995,7 +4998,8 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
             }
         };
 
-        if let Err(e) = insert_new_regulation_from_online(&conn, doc, doc_type_en, &target, file_size)
+        if let Err(e) =
+            insert_new_regulation_from_online(&conn, doc, doc_type_en, &target, file_size)
         {
             warn!("写数据库失败 {}: {}", doc.title, e);
             download_failed += 1;
@@ -5008,7 +5012,10 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
         "download",
         missing_total,
         missing_total,
-        &format!("下载：{} 成功，{} 失败，{} 跳过(无URL)", downloaded, download_failed, download_skipped_no_url),
+        &format!(
+            "下载：{} 成功，{} 失败，{} 跳过(无URL)",
+            downloaded, download_failed, download_skipped_no_url
+        ),
     );
 
     // ==================== Stage 4: 归档同步 ====================
@@ -5051,11 +5058,8 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
             "archiveMissingSource": archive_stats.missing_source,
         }
     });
-    std::fs::write(
-        &state_path,
-        serde_json::to_string_pretty(&state).unwrap_or_default(),
-    )
-    .map_err(|e| format!("写 .server_sync_state.json 失败: {}", e))?;
+    std::fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap_or_default())
+        .map_err(|e| format!("写 .server_sync_state.json 失败: {}", e))?;
 
     info!(
         "[FullSync] 完成: 匹配 {}, 更新 {}, 失效标记 {}, 下载 {}, 失败 {}, 归档 rename {} / copy {}",
@@ -5099,8 +5103,9 @@ pub async fn regulation_cancel_full_sync(
 mod is_pdf_path_tests {
     use super::is_pdf_path;
     use super::{
-        is_invalid_regulation_file_record, is_supported_local_scan_path, load_local_text_content,
-        is_supported_realign_filename_path,
+        is_invalid_regulation_file_record, is_supported_local_scan_path,
+        is_supported_realign_filename_path, load_local_text_content,
+        should_skip_local_file_as_duplicate, LocalCopyMode,
     };
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -5194,5 +5199,15 @@ mod is_pdf_path_tests {
         std::fs::write(&txt_path, "检查员 岗位职责\n局方要求").unwrap();
 
         assert!(!is_invalid_regulation_file_record(&txt_path));
+    }
+
+    #[test]
+    fn register_only_does_not_skip_new_path_with_existing_hash() {
+        assert!(!should_skip_local_file_as_duplicate(LocalCopyMode::RegisterOnly, false, true,));
+    }
+
+    #[test]
+    fn register_only_still_skips_existing_path() {
+        assert!(should_skip_local_file_as_duplicate(LocalCopyMode::RegisterOnly, true, true,));
     }
 }

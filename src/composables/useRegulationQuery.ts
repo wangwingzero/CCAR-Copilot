@@ -537,7 +537,8 @@ export function useRegulationQuery() {
    * 利用 Rust crawler + Tantivy 索引
    */
   async function downloadBatchNative(
-    documents: RegulationDocument[]
+    documents: RegulationDocument[],
+    scanFolders: string[] = []
   ): Promise<{ success: number; skipped: number; failed: number }> {
     try {
       isLoading.value = true
@@ -563,7 +564,7 @@ export function useRegulationQuery() {
       })
 
       // 下载完成后，触发 PDF 文本提取和索引
-      await processPendingFiles()
+      await processPendingFiles(10, scanFolders)
 
       return {
         success: result.success,
@@ -582,7 +583,10 @@ export function useRegulationQuery() {
    * 处理待提取文件（PDF 文本提取 + 索引）
    * 应在批量下载后调用
    */
-  async function processPendingFiles(batchSize = 10): Promise<{
+  async function processPendingFiles(
+    batchSize = 10,
+    scanFolders: string[] = []
+  ): Promise<{
     processed: number
     indexed: number
     needs_ocr: number
@@ -596,6 +600,7 @@ export function useRegulationQuery() {
         failed: number
       }>('regulation_process_pending', {
         batchSize,
+        scanFolders,
       })
 
       // 刷新本地索引统计
@@ -764,8 +769,8 @@ export function useRegulationQuery() {
   /**
    * 获取数据库同步状态
    */
-  async function refreshDbStatus(): Promise<void> {
-    await regulationStore.refreshDbStatus()
+  async function refreshDbStatus(scanFolders: string[] = []): Promise<void> {
+    await regulationStore.refreshDbStatus(scanFolders)
   }
 
   /**
@@ -780,7 +785,8 @@ export function useRegulationQuery() {
    */
   async function ocrPendingFiles(
     batchSize: number = 5,
-    onProgress?: (current: string, done: number, total: number) => void
+    onProgress?: (current: string, done: number, total: number) => void,
+    scanFolders: string[] = []
   ): Promise<OcrPendingResult> {
     let progressCleanup: (() => void) | null = null
     try {
@@ -819,7 +825,7 @@ export function useRegulationQuery() {
         ocr_success: number
         ocr_failed: number
         skipped: number
-      }>('regulation_ocr_pending', { batchSize })
+      }>('regulation_ocr_pending', { batchSize, scanFolders })
 
       // 刷新索引统计
       await regulationIndex.refreshStats()

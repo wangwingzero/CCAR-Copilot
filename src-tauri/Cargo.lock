@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "ccar-copilot"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "bincode",
  "chrono",

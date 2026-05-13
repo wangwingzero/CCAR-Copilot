@@ -147,6 +147,30 @@ impl RegulationIndex {
         Ok(())
     }
 
+    /// 按 URL 覆盖写入文档。
+    ///
+    /// 扫描阶段会先写入只有标题/文件名的元数据文档；OCR 完成后需要用带正文的
+    /// 文档替换它，否则后续正文搜索永远搜不到 OCR 结果。
+    pub fn upsert_document(&self, doc: &RegulationDocument) -> Result<(), HuGeError> {
+        use tantivy::Term;
+
+        let tantivy_doc = doc.to_tantivy_doc(&self.fields);
+        let term = Term::from_field_text(self.fields.url, &doc.url);
+
+        let writer = self
+            .writer
+            .write()
+            .map_err(|e| HuGeError::Internal(format!("获取 Writer 锁失败: {}", e)))?;
+
+        writer.delete_term(term);
+        writer
+            .add_document(tantivy_doc)
+            .map_err(|e| HuGeError::Internal(format!("更新文档失败: {}", e)))?;
+
+        debug!("文档已覆盖写入索引: {}", doc.title);
+        Ok(())
+    }
+
     /// 批量添加文档
     pub fn add_documents(&self, docs: &[RegulationDocument]) -> Result<usize, HuGeError> {
         let writer = self
@@ -446,8 +470,8 @@ impl RegulationIndex {
 
         use tantivy::query::TermQuery;
         use tantivy::schema::IndexRecordOption;
-        use tantivy::Term;
         use tantivy::TantivyDocument;
+        use tantivy::Term;
 
         let searcher = self.reader.searcher();
         let mut writer = self
@@ -483,9 +507,7 @@ impl RegulationIndex {
             updated += 1;
         }
 
-        writer
-            .commit()
-            .map_err(|e| HuGeError::Internal(format!("提交索引失败: {}", e)))?;
+        writer.commit().map_err(|e| HuGeError::Internal(format!("提交索引失败: {}", e)))?;
         drop(writer);
         self.reader
             .reload()
@@ -629,9 +651,7 @@ impl RegulationIndex {
                     .add_document(doc.to_tantivy_doc(&fields))
                     .map_err(|e| HuGeError::Internal(format!("回写迁移文档失败: {}", e)))?;
             }
-            writer
-                .commit()
-                .map_err(|e| HuGeError::Internal(format!("提交迁移失败: {}", e)))?;
+            writer.commit().map_err(|e| HuGeError::Internal(format!("提交迁移失败: {}", e)))?;
         }
         info!("v2→v3 迁移：已回写 {} 篇文档到新 schema", documents.len());
         Ok(())
@@ -763,5 +783,42 @@ mod tests {
         let results = index.search("大型飞机", 10).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].doc_number, "CCAR-121-R7");
+    }
+
+    #[test]
+    fn upsert_replaces_metadata_only_document_with_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let index = RegulationIndex::open_or_create(temp_dir.path().to_path_buf()).unwrap();
+
+        let metadata_doc = RegulationDocument {
+            title: "飞行检查员工作手册".to_string(),
+            doc_number: "AP-TEST".to_string(),
+            validity: "有效".to_string(),
+            doc_type: "normative".to_string(),
+            office_unit: String::new(),
+            sign_date: String::new(),
+            publish_date: String::new(),
+            url: "file:///D:/docs/checker.pdf".to_string(),
+            file_path: "D:\\docs\\checker.pdf".to_string(),
+            content: String::new(),
+        };
+
+        index.add_document(&metadata_doc).unwrap();
+        index.commit().unwrap();
+
+        let filename_results = index.search("检查员", 10).unwrap();
+        assert_eq!(filename_results.len(), 1);
+        assert_eq!(filename_results[0].url, metadata_doc.url);
+        assert!(filename_results[0].content.is_empty());
+
+        let mut content_doc = metadata_doc;
+        content_doc.content = "检查员应当按照手册完成监督检查".to_string();
+        index.upsert_document(&content_doc).unwrap();
+        index.commit().unwrap();
+
+        let results = index.search("监督检查", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, content_doc.url);
+        assert!(results[0].content.contains("监督检查"));
     }
 }
