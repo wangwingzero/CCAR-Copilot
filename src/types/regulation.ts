@@ -24,7 +24,7 @@ export interface RegulationDocument {
   pdf_url?: string
   /** 本地文件路径 */
   file_path: string
-  /** PDF 正文内容（用于全文搜索） */
+  /** 正文内容（用于全文搜索） */
   content?: string
 }
 
@@ -36,6 +36,8 @@ export interface RegulationSearchRequest {
   validity?: string
   /** 文档类型：all, regulation, normative */
   doc_type?: string
+  /** 限制本地搜索结果必须位于这些扫描目录内 */
+  scan_folders?: string[]
   /** 返回数量限制 */
   limit?: number
   /** 排序方式：relevance, date_desc, date_asc, title_asc */
@@ -77,7 +79,7 @@ export type RegulationSortOrder = 'relevance' | 'date_desc' | 'date_asc' | 'titl
 export interface RegulationScanProgress {
   /** 已扫描文件数 */
   scanned: number
-  /** 发现的 PDF 文件总数 */
+  /** 发现的受支持文件总数（PDF / TXT） */
   total_found: number
   /** 新文件数（非重复） */
   new_files: number
@@ -145,7 +147,7 @@ export interface RegulationDiff {
 
 /** 本地扫描结果 */
 export interface RegulationScanResponse {
-  /** 发现的 PDF 文件总数 */
+  /** 发现的受支持文件总数（PDF / TXT） */
   total_found: number
   /** 新文件数 */
   new_files: number
@@ -157,7 +159,7 @@ export interface RegulationScanResponse {
   needs_ocr: number
   /** 失败数 */
   failed: number
-  /** 跳过的非 PDF 文件数 */
+  /** 跳过的不支持类型文件数 */
   skipped_non_pdf: number
   /** OCR 成功索引数 */
   ocr_success: number

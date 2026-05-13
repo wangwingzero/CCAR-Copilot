@@ -21,6 +21,8 @@
 use image::DynamicImage;
 use pdfium_render::prelude::*;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// PDF OCR 结果
@@ -57,6 +59,16 @@ pub enum PdfOcrError {
 
     #[error("文件不存在: {0}")]
     FileNotFound(String),
+
+    #[error("OCR 已中止")]
+    Cancelled,
+}
+
+fn is_cancelled(cancel_flag: &Option<Arc<AtomicBool>>) -> bool {
+    cancel_flag
+        .as_ref()
+        .map(|flag| flag.load(Ordering::Relaxed))
+        .unwrap_or(false)
 }
 
 /// 检测文本是否包含大量乱码/替换字符（PUA 区域）
@@ -165,7 +177,21 @@ pub fn ocr_pdf(
     max_pages: usize,
     progress_callback: Option<&dyn Fn(usize, usize)>,
 ) -> Result<PdfOcrResult, PdfOcrError> {
+    ocr_pdf_with_cancel(pdf_path, max_pages, None, progress_callback)
+}
+
+/// 对 PDF 文件执行 OCR，支持外部取消标记。
+pub fn ocr_pdf_with_cancel(
+    pdf_path: &str,
+    max_pages: usize,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    progress_callback: Option<&dyn Fn(usize, usize)>,
+) -> Result<PdfOcrResult, PdfOcrError> {
     let start = std::time::Instant::now();
+
+    if is_cancelled(&cancel_flag) {
+        return Err(PdfOcrError::Cancelled);
+    }
 
     // 检查文件是否存在
     if !Path::new(pdf_path).exists() {
@@ -195,8 +221,16 @@ pub fn ocr_pdf(
     let mut ocr_pages = 0;
 
     for i in 0..pages_to_process {
+        if is_cancelled(&cancel_flag) {
+            return Err(PdfOcrError::Cancelled);
+        }
+
         if let Some(cb) = progress_callback {
             cb(i + 1, pages_to_process);
+        }
+
+        if is_cancelled(&cancel_flag) {
+            return Err(PdfOcrError::Cancelled);
         }
 
         let page = document
@@ -302,5 +336,13 @@ mod tests {
         for path in &paths {
             println!("搜索路径: {:?}", path);
         }
+    }
+
+    #[test]
+    fn ocr_pdf_with_cancel_returns_cancelled_before_opening_pdf() {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let result = ocr_pdf_with_cancel("missing-file.pdf", 1, Some(cancel), None);
+
+        assert!(matches!(result, Err(PdfOcrError::Cancelled)));
     }
 }

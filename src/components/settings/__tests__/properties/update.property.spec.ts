@@ -4,19 +4,37 @@
  * Feature: settings-enhancement
  *
  * This file tests the update settings behavior:
- * - Property 11: Update Interval Clamping
- * - Property 12: Proxy URL Conditional Visibility
+ * - Property 11: Update interval controls are not shown
+ * - Property 12: Update proxy controls are not shown
  *
  * **Validates: Requirements 8.3, 8.5**
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
-import { mount, VueWrapper } from '@vue/test-utils'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { flushPromises, mount, VueWrapper } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 import { createI18n } from 'vue-i18n'
 import * as fc from 'fast-check'
 import { useSettingsStore } from '@/stores/settings'
 import UpdateSection from '../../sections/UpdateSection.vue'
+
+const mocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  listen: vi.fn(),
+  open: vi.fn(),
+}))
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: mocks.invoke,
+}))
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: mocks.listen,
+}))
+
+vi.mock('@tauri-apps/plugin-shell', () => ({
+  open: mocks.open,
+}))
 
 // ============================================================================
 // Test Setup
@@ -48,6 +66,11 @@ function createTestI18n() {
             checkNowBtn: 'Check',
             checking: 'Checking...',
             lastCheck: 'Last Check',
+            manualDownload: 'Manual Update',
+            manualDownloadHelp: 'Open the latest Windows installer in your browser',
+            openLatestInstaller: 'Open Installer',
+            openingLatestInstaller: 'Opening...',
+            manualDownloadError: 'Failed to open installer URL: {message}',
             // v0.1.6 新增 - 同步测试 i18n fixture,避免 intlify warning
             statusError: 'Failed to check for updates',
             statusUpToDate: 'You are up to date',
@@ -92,48 +115,58 @@ function mountUpdateSection(): VueWrapper {
 }
 
 // ============================================================================
-// Property 11: Update Interval Clamping
+// Property 11: Update Interval Controls Removed
 // ============================================================================
 
-describe('Feature: settings-enhancement, Property 11: Update Interval Clamping', () => {
+describe('Feature: settings-enhancement, Property 11: Update Interval Controls Removed', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    mocks.invoke.mockReset()
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === 'get_current_version') return Promise.resolve('0.1.9')
+      if (command === 'get_update_config') {
+        return Promise.resolve({
+          auto_update_enabled: true,
+          check_interval_hours: 24,
+          check_on_startup: true,
+          auto_download: true,
+          auto_install: false,
+        })
+      }
+      if (command === 'get_latest_update_download_url') {
+        return Promise.resolve(
+          'https://ccar-update.031986.xyz/downloads/CCAR%20Copilot_0.1.9_x64-setup.exe'
+        )
+      }
+      return Promise.resolve(undefined)
+    })
+    mocks.listen.mockReset()
+    mocks.listen.mockResolvedValue(vi.fn())
+    mocks.open.mockReset()
+    mocks.open.mockResolvedValue(undefined)
   })
 
-  it('should clamp check interval to valid range [1, 168]', () => {
-    fc.assert(
-      fc.property(
-        fc.integer({ min: -1000, max: 1000 }),
-        (inputValue: number) => {
-          const store = useSettingsStore()
-          
-          // Update with arbitrary value
-          store.updateUpdate({ checkIntervalHours: inputValue })
-          
-          // The store should accept the value (clamping happens in UI)
-          // But we verify the value is stored
-          expect(typeof store.update.checkIntervalHours).toBe('number')
-        }
-      ),
-      { numRuns: 100, verbose: true }
-    )
+  it('does not render update interval controls', () => {
+    const wrapper = mountUpdateSection()
+
+    expect(wrapper.text()).not.toContain('Check Interval')
+
+    wrapper.unmount()
   })
 
-  it('should preserve check interval when updating other settings', () => {
+  it('preserves hidden check interval value when updating visible settings', () => {
     fc.assert(
       fc.property(
         fc.integer({ min: 1, max: 168 }),
         fc.boolean(),
-        fc.boolean(),
-        fc.string(),
-        (interval: number, autoCheck: boolean, useProxy: boolean, proxyUrl: string) => {
+        (interval: number, autoCheck: boolean) => {
           const store = useSettingsStore()
           
           // Set initial interval
           store.updateUpdate({ checkIntervalHours: interval })
-          
+
           // Update other settings
-          store.updateUpdate({ autoCheck, useProxy, proxyUrl })
+          store.updateUpdate({ autoCheck })
           
           // Verify interval is preserved
           expect(store.update.checkIntervalHours).toBe(interval)
@@ -145,116 +178,57 @@ describe('Feature: settings-enhancement, Property 11: Update Interval Clamping',
 })
 
 // ============================================================================
-// Property 12: Proxy URL Conditional Visibility
+// Property 12: Update Proxy Controls Removed
 // ============================================================================
 
-describe('Feature: settings-enhancement, Property 12: Proxy URL Conditional Visibility', () => {
+describe('Feature: settings-enhancement, Property 12: Update Proxy Controls Removed', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    mocks.invoke.mockReset()
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === 'get_current_version') return Promise.resolve('0.1.9')
+      if (command === 'get_update_config') {
+        return Promise.resolve({
+          auto_update_enabled: true,
+          check_interval_hours: 24,
+          check_on_startup: true,
+          auto_download: true,
+          auto_install: false,
+        })
+      }
+      if (command === 'get_latest_update_download_url') {
+        return Promise.resolve(
+          'https://ccar-update.031986.xyz/downloads/CCAR%20Copilot_0.1.9_x64-setup.exe'
+        )
+      }
+      return Promise.resolve(undefined)
+    })
+    mocks.listen.mockReset()
+    mocks.listen.mockResolvedValue(vi.fn())
+    mocks.open.mockReset()
+    mocks.open.mockResolvedValue(undefined)
   })
 
-  it('should show proxy URL input only when useProxy is true', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.boolean(),
-        async (useProxy: boolean) => {
-          const wrapper = mountUpdateSection()
-          const store = useSettingsStore()
-          
-          // Set useProxy state
-          store.updateUpdate({ useProxy })
-          await wrapper.vm.$nextTick()
-          
-          // Find proxy URL input container
-          const settingItems = wrapper.findAll('.setting-item')
-          const proxyUrlItem = settingItems.find(item => 
-            item.text().includes('Proxy URL')
-          )
-          
-          if (useProxy) {
-            // When useProxy is true, proxy URL should be visible
-            expect(proxyUrlItem?.isVisible() ?? false).toBe(true)
-          } else {
-            // When useProxy is false, proxy URL should be hidden
-            // Note: v-show keeps element in DOM but hides it
-            expect(proxyUrlItem?.isVisible() ?? true).toBe(false)
-          }
-          
-          wrapper.unmount()
-          return true
-        }
-      ),
-      // Reduced numRuns for component mounting tests to avoid timeout
-      { numRuns: 20, verbose: true }
-    )
-  }, 30000) // 30s timeout for component tests
+  it('does not render update proxy controls', () => {
+    const wrapper = mountUpdateSection()
 
-  it('should toggle proxy URL visibility when useProxy changes', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.array(fc.boolean(), { minLength: 2, maxLength: 5 }),
-        async (toggleSequence: boolean[]) => {
-          const wrapper = mountUpdateSection()
-          const store = useSettingsStore()
-          
-          for (const useProxy of toggleSequence) {
-            store.updateUpdate({ useProxy })
-            await wrapper.vm.$nextTick()
-            
-            // Verify the store state is correct
-            expect(store.update.useProxy).toBe(useProxy)
-          }
-          
-          wrapper.unmount()
-          return true
-        }
-      ),
-      { numRuns: 100, verbose: true }
-    )
+    expect(wrapper.text()).not.toContain('Use Proxy')
+    expect(wrapper.text()).not.toContain('Proxy URL')
+
+    wrapper.unmount()
   })
 
-  it('should preserve proxy URL value when toggling useProxy', () => {
-    fc.assert(
-      fc.property(
-        fc.webUrl(),
-        fc.array(fc.boolean(), { minLength: 2, maxLength: 5 }),
-        (proxyUrl: string, toggleSequence: boolean[]) => {
-          const store = useSettingsStore()
-          
-          // Set initial proxy URL
-          store.updateUpdate({ proxyUrl })
-          
-          // Toggle useProxy multiple times
-          for (const useProxy of toggleSequence) {
-            store.updateUpdate({ useProxy })
-          }
-          
-          // Verify proxy URL is preserved
-          expect(store.update.proxyUrl).toBe(proxyUrl)
-        }
-      ),
-      { numRuns: 100, verbose: true }
-    )
-  })
+  it('opens the latest installer link in the browser', async () => {
+    const wrapper = mountUpdateSection()
 
-  it('should set isDirty when useProxy changes', () => {
-    fc.assert(
-      fc.property(
-        fc.boolean(),
-        (useProxy: boolean) => {
-          const store = useSettingsStore()
-          
-          // Reset dirty flag
-          store.$patch({ isDirty: false })
-          
-          // Update useProxy
-          store.updateUpdate({ useProxy })
-          
-          // Verify isDirty is set
-          expect(store.isDirty).toBe(true)
-        }
-      ),
-      { numRuns: 100, verbose: true }
+    await wrapper.find('[data-testid="open-latest-installer"]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.invoke).toHaveBeenCalledWith('get_latest_update_download_url')
+    expect(mocks.open).toHaveBeenCalledWith(
+      'https://ccar-update.031986.xyz/downloads/CCAR%20Copilot_0.1.9_x64-setup.exe'
     )
+
+    wrapper.unmount()
   })
 })

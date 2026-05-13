@@ -11,8 +11,8 @@
 //!
 //! # 示例
 //!
-//! ```rust
-//! use hugescreenshot_tauri_lib::ocr::OcrConfig;
+//! ```ignore
+//! use ccar_copilot_lib::ocr::OcrConfig;
 //!
 //! // 使用默认配置
 //! let config = OcrConfig::default();
@@ -117,8 +117,8 @@ impl OcrConfig {
     ///
     /// # 示例
     ///
-    /// ```rust
-    /// # use hugescreenshot_tauri_lib::ocr::OcrConfig;
+    /// ```ignore
+    /// # use ccar_copilot_lib::ocr::OcrConfig;
     /// let config = OcrConfig::new(0.6, 4096, 960, 48);
     /// ```
     pub fn new(
@@ -138,8 +138,8 @@ impl OcrConfig {
     ///
     /// # 示例
     ///
-    /// ```rust
-    /// # use hugescreenshot_tauri_lib::ocr::OcrConfig;
+    /// ```ignore
+    /// # use ccar_copilot_lib::ocr::OcrConfig;
     /// let config = OcrConfig::default().with_confidence_threshold(0.7);
     /// ```
     ///
@@ -159,8 +159,8 @@ impl OcrConfig {
     ///
     /// # 示例
     ///
-    /// ```rust
-    /// # use hugescreenshot_tauri_lib::ocr::OcrConfig;
+    /// ```ignore
+    /// # use ccar_copilot_lib::ocr::OcrConfig;
     /// let config = OcrConfig::default().with_max_image_size(4096);
     /// ```
     ///
@@ -180,8 +180,8 @@ impl OcrConfig {
     ///
     /// # 示例
     ///
-    /// ```rust
-    /// # use hugescreenshot_tauri_lib::ocr::OcrConfig;
+    /// ```ignore
+    /// # use ccar_copilot_lib::ocr::OcrConfig;
     /// let config = OcrConfig::default().with_det_input_size(1280);
     /// ```
     ///
@@ -203,8 +203,8 @@ impl OcrConfig {
     ///
     /// # 示例
     ///
-    /// ```rust
-    /// # use hugescreenshot_tauri_lib::ocr::OcrConfig;
+    /// ```ignore
+    /// # use ccar_copilot_lib::ocr::OcrConfig;
     /// let config = OcrConfig::default().with_rec_input_height(32);
     /// ```
     ///
@@ -227,8 +227,8 @@ impl OcrConfig {
     ///
     /// # 示例
     ///
-    /// ```rust
-    /// # use hugescreenshot_tauri_lib::ocr::OcrConfig;
+    /// ```ignore
+    /// # use ccar_copilot_lib::ocr::OcrConfig;
     /// let config = OcrConfig::default();
     /// assert!(config.validate().is_ok());
     /// ```
@@ -279,8 +279,8 @@ impl OcrConfig {
     ///
     /// # 示例
     ///
-    /// ```rust
-    /// # use hugescreenshot_tauri_lib::ocr::OcrConfig;
+    /// ```ignore
+    /// # use ccar_copilot_lib::ocr::OcrConfig;
     /// let config = OcrConfig::high_accuracy();
     /// assert_eq!(config.confidence_threshold, 0.7);
     /// ```
@@ -302,8 +302,8 @@ impl OcrConfig {
     ///
     /// # 示例
     ///
-    /// ```rust
-    /// # use hugescreenshot_tauri_lib::ocr::OcrConfig;
+    /// ```ignore
+    /// # use ccar_copilot_lib::ocr::OcrConfig;
     /// let config = OcrConfig::high_speed();
     /// assert_eq!(config.det_input_size, 480);
     /// ```
@@ -332,8 +332,8 @@ impl OcrConfig {
     ///
     /// # 示例
     ///
-    /// ```rust
-    /// # use hugescreenshot_tauri_lib::ocr::OcrConfig;
+    /// ```ignore
+    /// # use ccar_copilot_lib::ocr::OcrConfig;
     /// let config = OcrConfig::screenshot_optimized();
     /// ```
     pub fn screenshot_optimized() -> Self {

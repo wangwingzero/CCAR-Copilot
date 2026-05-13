@@ -20,6 +20,7 @@ interface RegulationSearchRequest {
   doc_type?: string
   start_date?: string
   end_date?: string
+  scan_folders?: string[]
   limit?: number
   sort?: string
 }
@@ -93,6 +94,7 @@ export function useRegulationIndex() {
       docType?: RegulationDocType
       startDate?: string
       endDate?: string
+      scanFolders?: string[]
       limit?: number
       sort?: RegulationSortOrder
     } = {}
@@ -116,6 +118,7 @@ export function useRegulationIndex() {
         doc_type: options.docType || 'all',
         start_date: options.startDate || '',
         end_date: options.endDate || '',
+        scan_folders: options.scanFolders || [],
         limit: options.limit || 100,
         sort: options.sort || 'relevance',
       }

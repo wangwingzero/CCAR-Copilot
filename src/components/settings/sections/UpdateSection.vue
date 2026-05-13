@@ -14,13 +14,14 @@
  *    - 显示当前版本、发现的新版本、下载进度、发布说明和重启提示
  */
 
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { ExternalLink, RefreshCw } from 'lucide-vue-next'
+import { open } from '@tauri-apps/plugin-shell'
 import { useSettingsStore } from '@/stores/settings'
 import { useUpdate } from '@/composables/useUpdate'
 import SettingsGroup from '@/components/settings/controls/SettingsGroup.vue'
 import SettingItem from '@/components/settings/controls/SettingItem.vue'
-import SliderControl from '@/components/settings/controls/SliderControl.vue'
 import ToggleSwitch from '@/components/settings/controls/ToggleSwitch.vue'
 
 // ============================================
@@ -37,6 +38,7 @@ const {
   totalBytes,
   downloadSpeed,
   downloadEtaSeconds,
+  latestDownloadUrl,
   isChecking,
   isDownloading,
   isUpdateAvailable,
@@ -47,9 +49,12 @@ const {
   restartApp,
   skipCurrentVersion,
   retryLastAction,
+  getLatestUpdateDownloadUrl,
 } = useUpdate()
 
 const { t } = useI18n()
+const isOpeningLatestInstaller = ref(false)
+const manualDownloadError = ref('')
 
 // ============================================
 // Computed
@@ -126,29 +131,12 @@ function handleAutoCheckChange(value: boolean): void {
   settingsStore.updateUpdate({ autoCheck: value })
 }
 
-function handleCheckIntervalChange(value: number): void {
-  settingsStore.updateUpdate({ checkIntervalHours: value })
-}
-
-function handleUseProxyChange(value: boolean): void {
-  settingsStore.updateUpdate({ useProxy: value })
-}
-
-function handleProxyUrlInput(event: Event): void {
-  const target = event.target as HTMLInputElement
-  settingsStore.updateUpdate({ proxyUrl: target.value })
-}
-
-function handleProxyUrlChange(event: Event): void {
-  const target = event.target as HTMLInputElement
-  settingsStore.updateUpdate({ proxyUrl: target.value })
-}
-
 /**
  * 触发立即检查更新,并把最后检查时间写入 settings store
  */
 async function handleCheckNow(): Promise<void> {
   if (isChecking.value || isDownloading.value) return
+  manualDownloadError.value = ''
   try {
     await checkForUpdate()
   } finally {
@@ -163,6 +151,20 @@ async function handleDownloadAndInstall(): Promise<void> {
 
 async function handleRestart(): Promise<void> {
   await restartApp()
+}
+
+async function handleOpenLatestInstaller(): Promise<void> {
+  if (isOpeningLatestInstaller.value) return
+  isOpeningLatestInstaller.value = true
+  manualDownloadError.value = ''
+  try {
+    const url = await getLatestUpdateDownloadUrl()
+    await open(url)
+  } catch (e) {
+    manualDownloadError.value = String(e)
+  } finally {
+    isOpeningLatestInstaller.value = false
+  }
 }
 
 /** 「重试」按钮: 根据上次失败的动作重新 check / download */
@@ -193,14 +195,47 @@ function handleSkipVersion(): void {
             :disabled="isChecking || isDownloading"
             @click="handleCheckNow"
           >
-            {{
-              isChecking
-                ? $t('settings.update.checking')
-                : $t('settings.update.checkNowBtn')
-            }}
+            <RefreshCw class="btn-icon" :class="{ spinning: isChecking }" :size="14" />
+            <span>
+              {{
+                isChecking
+                  ? $t('settings.update.checking')
+                  : $t('settings.update.checkNowBtn')
+              }}
+            </span>
           </button>
           <span v-if="updateConfig.lastCheckTime" class="last-check-inline">
             {{ $t('settings.update.lastCheck') }}: {{ formatLastCheckTime }}
+          </span>
+        </div>
+      </SettingItem>
+
+      <!-- 手动下载安装包 -->
+      <SettingItem
+        :label="$t('settings.update.manualDownload')"
+        :help-text="$t('settings.update.manualDownloadHelp')"
+      >
+        <div class="manual-download-wrap">
+          <button
+            data-testid="open-latest-installer"
+            class="manual-download-btn"
+            :disabled="isOpeningLatestInstaller"
+            @click="handleOpenLatestInstaller"
+          >
+            <ExternalLink class="btn-icon" :size="14" />
+            <span>
+              {{
+                isOpeningLatestInstaller
+                  ? $t('settings.update.openingLatestInstaller')
+                  : $t('settings.update.openLatestInstaller')
+              }}
+            </span>
+          </button>
+          <span v-if="latestDownloadUrl" class="installer-url" :title="latestDownloadUrl">
+            {{ latestDownloadUrl }}
+          </span>
+          <span v-if="manualDownloadError" class="manual-download-error">
+            {{ $t('settings.update.manualDownloadError', { message: manualDownloadError }) }}
           </span>
         </div>
       </SettingItem>
@@ -310,46 +345,6 @@ function handleSkipVersion(): void {
         />
       </SettingItem>
 
-      <SettingItem
-        v-show="updateConfig.autoCheck"
-        :label="$t('settings.update.checkInterval')"
-        :help-text="$t('settings.update.checkIntervalHelp')"
-      >
-        <SliderControl
-          :model-value="updateConfig.checkIntervalHours"
-          :min="1"
-          :max="168"
-          :step="1"
-          suffix="h"
-          @update:model-value="handleCheckIntervalChange"
-        />
-      </SettingItem>
-
-      <SettingItem
-        :label="$t('settings.update.useProxy')"
-        :help-text="$t('settings.update.useProxyHelp')"
-      >
-        <ToggleSwitch
-          :model-value="updateConfig.useProxy"
-          :aria-label="$t('settings.update.useProxy')"
-          @update:model-value="handleUseProxyChange"
-        />
-      </SettingItem>
-
-      <SettingItem
-        v-show="updateConfig.useProxy"
-        :label="$t('settings.update.proxyUrl')"
-        :help-text="$t('settings.update.proxyUrlHelp')"
-      >
-        <input
-          :value="updateConfig.proxyUrl"
-          type="text"
-          class="setting-input"
-          placeholder="https://ghproxy.net/"
-          @input="handleProxyUrlInput"
-          @change="handleProxyUrlChange"
-        />
-      </SettingItem>
     </SettingsGroup>
   </div>
 </template>
@@ -366,6 +361,14 @@ function handleSkipVersion(): void {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.manual-download-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  min-width: 0;
 }
 
 .last-check-inline {
@@ -502,6 +505,65 @@ function handleSkipVersion(): void {
   cursor: not-allowed;
 }
 
+.manual-download-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--color-accent, #0a84ff);
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(10, 132, 255, 0.12);
+  color: var(--color-accent, #0a84ff);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color var(--transition-fast, 0.15s),
+    color var(--transition-fast, 0.15s);
+}
+
+.manual-download-btn:hover:not(:disabled) {
+  background: var(--color-accent, #0a84ff);
+  color: #fff;
+}
+
+.manual-download-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-icon {
+  flex: 0 0 auto;
+}
+
+.spinning {
+  animation: update-spin 0.9s linear infinite;
+}
+
+@keyframes update-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.installer-url {
+  max-width: min(440px, 100%);
+  color: var(--color-text-secondary, #ebebf599);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manual-download-error {
+  max-width: min(440px, 100%);
+  color: var(--color-danger, #ff453a);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: right;
+  word-break: break-word;
+}
+
 .status-error-title {
   color: var(--color-danger, #ff453a);
 }
@@ -532,6 +594,10 @@ function handleSkipVersion(): void {
 }
 
 .check-now-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 6px 16px;
   border: none;
   border-radius: var(--radius-sm, 6px);

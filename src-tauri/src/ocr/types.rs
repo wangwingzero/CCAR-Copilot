@@ -36,7 +36,7 @@ use thiserror::Error;
 /// # 示例
 ///
 /// ```rust
-/// use hugescreenshot_tauri_lib::ocr::types::OcrResult;
+/// use ccar_copilot_lib::ocr::types::OcrResult;
 ///
 /// let result = OcrResult {
 ///     text: "Hello\n你好".to_string(),

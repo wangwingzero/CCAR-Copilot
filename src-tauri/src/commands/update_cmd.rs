@@ -27,9 +27,36 @@
 //! - 19.6: 用户可以在设置中禁用自动更新
 
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
 use tracing::{info, warn};
+
+static UPDATE_DOWNLOAD_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+const UPDATE_MANIFEST_ENDPOINTS: [&str; 2] =
+    ["https://ccar-update.031986.xyz/latest.json", "https://ccar-dl.hudawang.cn/latest.json"];
+const WINDOWS_UPDATE_TARGET: &str = "windows-x86_64";
+
+struct DownloadGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl Drop for DownloadGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+fn try_acquire_download_guard(flag: &AtomicBool) -> Option<DownloadGuard<'_>> {
+    flag.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .ok()
+        .map(|_| DownloadGuard { flag })
+}
 
 /// 更新信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +69,18 @@ pub struct UpdateInfo {
     pub date: Option<String>,
     /// 下载大小（字节）
     pub download_size: Option<u64>,
+    /// 安装包下载地址
+    pub download_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateManifest {
+    platforms: HashMap<String, UpdateManifestPlatform>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateManifestPlatform {
+    url: String,
 }
 
 /// 更新状态
@@ -99,9 +138,7 @@ impl Default for UpdateConfig {
 /// 可解析时套上 HTTP 代理;否则使用默认的系统 TLS 直连。
 ///
 /// 失败时返回字符串错误,便于直接返回给前端。
-fn build_updater(
-    app: &AppHandle,
-) -> Result<tauri_plugin_updater::Updater, String> {
+fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     use crate::database::settings::{get_config_path, load_config};
 
     let config_path = get_config_path(app).map_err(|e| e.to_string())?;
@@ -126,6 +163,53 @@ fn build_updater(
     builder.build().map_err(|e| format!("构造 updater 失败: {}", e))
 }
 
+fn normalize_installer_url(raw: &str) -> Result<String, String> {
+    let candidate = raw.trim().replace(' ', "%20");
+    let parsed =
+        url::Url::parse(&candidate).map_err(|e| format!("安装包 URL 无效: {} ({})", raw, e))?;
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("安装包 URL 协议不支持: {}", raw));
+    }
+
+    if !parsed.path().to_ascii_lowercase().ends_with(".exe") {
+        return Err(format!("安装包 URL 不是 exe 文件: {}", raw));
+    }
+
+    Ok(parsed.to_string())
+}
+
+fn extract_windows_download_url_from_manifest(manifest: &str) -> Result<String, String> {
+    let manifest: UpdateManifest =
+        serde_json::from_str(manifest).map_err(|e| format!("解析更新清单失败: {}", e))?;
+
+    if let Some(platform) = manifest.platforms.get(WINDOWS_UPDATE_TARGET) {
+        return normalize_installer_url(&platform.url);
+    }
+
+    manifest
+        .platforms
+        .values()
+        .find_map(|platform| normalize_installer_url(&platform.url).ok())
+        .ok_or_else(|| "更新清单中没有 Windows exe 安装包地址".to_string())
+}
+
+fn build_manifest_http_client(app: &AppHandle) -> Result<reqwest::Client, String> {
+    use crate::database::settings::{get_config_path, load_config};
+
+    let config_path = get_config_path(app).map_err(|e| e.to_string())?;
+    let app_config = load_config(&config_path).map_err(|e| e.to_string())?;
+
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(20));
+    if app_config.update.use_proxy && !app_config.update.proxy_url.trim().is_empty() {
+        let proxy = reqwest::Proxy::all(app_config.update.proxy_url.trim())
+            .map_err(|e| format!("代理 URL 无法解析: {}", e))?;
+        builder = builder.proxy(proxy);
+    }
+
+    builder.build().map_err(|e| format!("构造更新清单 HTTP 客户端失败: {}", e))
+}
+
 /// 检查更新
 ///
 /// # Requirements
@@ -138,16 +222,14 @@ pub async fn check_for_update(app: AppHandle) -> Result<UpdateStatus, String> {
     let updater = build_updater(&app)?;
     match updater.check().await {
         Ok(Some(update)) => {
-            info!(
-                "发现新版本 {} (当前 {})",
-                update.version, update.current_version
-            );
+            info!("发现新版本 {} (当前 {})", update.version, update.current_version);
             Ok(UpdateStatus::Available {
                 info: UpdateInfo {
                     version: update.version.clone(),
                     notes: update.body.clone(),
                     date: update.date.map(|d| d.to_string()),
                     download_size: None,
+                    download_url: Some(update.download_url.to_string()),
                 },
             })
         }
@@ -172,6 +254,9 @@ pub async fn check_for_update(app: AppHandle) -> Result<UpdateStatus, String> {
 #[tauri::command]
 pub async fn download_and_install_update(app: AppHandle) -> Result<UpdateStatus, String> {
     info!("下载并安装更新...");
+
+    let _download_guard = try_acquire_download_guard(&UPDATE_DOWNLOAD_IN_PROGRESS)
+        .ok_or_else(|| "已有更新下载任务正在进行".to_string())?;
 
     let updater = build_updater(&app)?;
     let update = updater
@@ -288,6 +373,47 @@ pub async fn set_update_config(app: AppHandle, config: UpdateConfig) -> Result<(
     Ok(())
 }
 
+/// 获取最新版 Windows 安装包下载地址,供用户手动打开浏览器更新。
+#[tauri::command]
+pub async fn get_latest_update_download_url(app: AppHandle) -> Result<String, String> {
+    info!("获取最新版安装包地址...");
+
+    let client = build_manifest_http_client(&app)?;
+    let mut last_error: Option<String> = None;
+
+    for endpoint in UPDATE_MANIFEST_ENDPOINTS {
+        let result = async {
+            let response = client
+                .get(endpoint)
+                .send()
+                .await
+                .map_err(|e| format!("请求更新清单失败: {}", e))?;
+
+            if !response.status().is_success() {
+                return Err(format!("更新清单返回 HTTP {}", response.status()));
+            }
+
+            let body = response.text().await.map_err(|e| format!("读取更新清单失败: {}", e))?;
+
+            extract_windows_download_url_from_manifest(&body)
+        }
+        .await;
+
+        match result {
+            Ok(url) => return Ok(url),
+            Err(e) => {
+                warn!("从 {} 获取安装包地址失败: {}", endpoint, e);
+                last_error = Some(format!("{}: {}", endpoint, e));
+            }
+        }
+    }
+
+    Err(format!(
+        "获取最新版安装包地址失败: {}",
+        last_error.unwrap_or_else(|| "所有更新通道均不可用".to_string())
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,10 +442,69 @@ mod tests {
                 notes: Some("Bug fixes".to_string()),
                 date: Some("2024-01-01".to_string()),
                 download_size: Some(1024),
+                download_url: Some(
+                    "https://ccar-update.031986.xyz/downloads/CCAR%20Copilot_1.0.0_x64-setup.exe"
+                        .to_string(),
+                ),
             },
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("Available"));
         assert!(json.contains("1.0.0"));
+        assert!(json.contains("setup.exe"));
+    }
+
+    #[test]
+    fn test_extract_windows_download_url_from_manifest() {
+        let manifest = r#"{
+            "version": "1.0.0",
+            "notes": "Bug fixes",
+            "pub_date": "2026-05-13T00:00:00Z",
+            "platforms": {
+                "windows-x86_64": {
+                    "signature": "abc",
+                    "url": "https://ccar-update.031986.xyz/downloads/CCAR%20Copilot_1.0.0_x64-setup.exe"
+                }
+            }
+        }"#;
+
+        let url = extract_windows_download_url_from_manifest(manifest).unwrap();
+
+        assert_eq!(
+            url,
+            "https://ccar-update.031986.xyz/downloads/CCAR%20Copilot_1.0.0_x64-setup.exe"
+        );
+    }
+
+    #[test]
+    fn test_extract_windows_download_url_normalizes_spaces() {
+        let manifest = r#"{
+            "version": "1.0.0",
+            "platforms": {
+                "windows-x86_64": {
+                    "signature": "abc",
+                    "url": "https://ccar-update.031986.xyz/downloads/CCAR Copilot_1.0.0_x64-setup.exe"
+                }
+            }
+        }"#;
+
+        let url = extract_windows_download_url_from_manifest(manifest).unwrap();
+
+        assert_eq!(
+            url,
+            "https://ccar-update.031986.xyz/downloads/CCAR%20Copilot_1.0.0_x64-setup.exe"
+        );
+    }
+
+    #[test]
+    fn test_download_gate_rejects_concurrent_downloads_until_guard_drops() {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let first = try_acquire_download_guard(&flag).expect("first download should acquire gate");
+
+        assert!(try_acquire_download_guard(&flag).is_none());
+
+        drop(first);
+
+        assert!(try_acquire_download_guard(&flag).is_some());
     }
 }

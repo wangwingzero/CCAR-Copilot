@@ -37,6 +37,17 @@ interface RegulationSearchState {
   endDate: string
 }
 
+interface RegulationLocalSearchOptions {
+  scanFolders?: string[]
+}
+
+interface OcrPendingResult {
+  success: number
+  failed: number
+  total: number
+  cancelled?: boolean
+}
+
 /** localStorage 持久化 key */
 const REGULATION_SEARCH_PREFS_KEY = 'regulation-search-prefs'
 
@@ -250,7 +261,9 @@ export function useRegulationQuery() {
    * 本地搜索规章（毫秒级响应）
    * 搜索已下载并索引的文档
    */
-  async function searchLocal(): Promise<RegulationDocument[]> {
+  async function searchLocal(
+    options: RegulationLocalSearchOptions = {}
+  ): Promise<RegulationDocument[]> {
     if (!searchState.keyword.trim()) {
       results.value = []
       return []
@@ -264,6 +277,7 @@ export function useRegulationQuery() {
       startDate,
       endDate,
       limit: 100,
+      scanFolders: options.scanFolders,
     })
 
     // 更新结果到 UI（标题匹配优先）
@@ -279,7 +293,7 @@ export function useRegulationQuery() {
    * 混合搜索：先本地后在线，合并去重
    * 本地结果毫秒级返回先展示，在线结果补充后合并
    */
-  async function searchHybrid(): Promise<void> {
+  async function searchHybrid(options: RegulationLocalSearchOptions = {}): Promise<void> {
     if (isLoading.value) {
       return
     }
@@ -288,14 +302,18 @@ export function useRegulationQuery() {
     let localResults: RegulationDocument[] = []
 
     // 1. 先尝试本地搜索（毫秒级）
-    if (isLocalIndexReady.value && searchState.keyword.trim()) {
-      localResults = await searchLocal()
+    if (searchState.keyword.trim()) {
+      localResults = await searchLocal(options)
       if (localResults.length > 0) {
         results.value = localResults
         console.warn(
           `[RegulationQuery] 本地搜索返回 ${localResults.length} 条结果，耗时 ${localSearchElapsedMs.value}ms`
         )
       }
+    }
+
+    if (options.scanFolders?.length) {
+      return
     }
 
     // 2. 发起在线搜索
@@ -466,7 +484,7 @@ export function useRegulationQuery() {
           const indexDoc = {
             ...document,
             file_path: result.file_path,
-            content: '', // 暂不提取 PDF 正文
+            content: '', // 暂不提取正文
           }
           await regulationIndex.addDocument(indexDoc)
           console.warn(`[RegulationQuery] 文档已添加到本地索引: ${document.title}`)
@@ -591,7 +609,7 @@ export function useRegulationQuery() {
   }
 
   /**
-   * 扫描本地目录，将 PDF 文件入库 + 入索引
+   * 扫描本地目录，将 PDF / TXT 文件入库 + 入索引
    *
    * 扫描状态保存在 Pinia Store 中，组件切换不会丢失进度。
    *
@@ -625,9 +643,9 @@ export function useRegulationQuery() {
   }
 
   /**
-   * 全盘扫描所有 PDF 文件
+   * 全盘扫描所有 PDF / TXT 文件
    *
-   * 遍历 Windows 所有盘符，递归收集 PDF 并入库索引。
+   * 遍历 Windows 所有盘符，递归收集 PDF / TXT 并入库索引。
    * 扫描状态保存在 Pinia Store 中，组件切换不会丢失进度。
    */
   async function scanAllDrives(): Promise<RegulationScanResponse | null> {
@@ -718,10 +736,28 @@ export function useRegulationQuery() {
 
       return compareResult
     } catch (err) {
-      error.value = err instanceof Error ? err.message : String(err)
+      const message = err instanceof Error ? err.message : String(err)
+      if (message.includes('中止') || message.toLowerCase().includes('cancel')) {
+        console.warn('[RegulationQuery] 同步已中止')
+        error.value = null
+        regulationStore.finishSyncCompare(null)
+        return null
+      }
+      error.value = message
       console.error('[RegulationQuery] 同步对比失败:', err)
       regulationStore.finishSyncCompare(null)
       return null
+    }
+  }
+
+  async function cancelSyncCompare(): Promise<boolean> {
+    try {
+      await invoke<boolean>('regulation_cancel_sync_compare')
+      return true
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+      console.error('[RegulationQuery] 中止同步失败:', err)
+      return false
     }
   }
 
@@ -745,12 +781,12 @@ export function useRegulationQuery() {
   async function ocrPendingFiles(
     batchSize: number = 5,
     onProgress?: (current: string, done: number, total: number) => void
-  ): Promise<{ success: number; failed: number; total: number }> {
+  ): Promise<OcrPendingResult> {
+    let progressCleanup: (() => void) | null = null
     try {
       error.value = null
 
       // 监听 OCR 进度事件
-      let progressCleanup: (() => void) | null = null
       if (onProgress) {
         const { listen } = await import('@tauri-apps/api/event')
         let lastDone = 0
@@ -785,9 +821,6 @@ export function useRegulationQuery() {
         skipped: number
       }>('regulation_ocr_pending', { batchSize })
 
-      // 清理进度监听
-      progressCleanup?.()
-
       // 刷新索引统计
       await regulationIndex.refreshStats()
 
@@ -800,9 +833,28 @@ export function useRegulationQuery() {
         total: result.processed,
       }
     } catch (err) {
-      error.value = err instanceof Error ? err.message : String(err)
+      const message = err instanceof Error ? err.message : String(err)
+      if (message.includes('中止') || message.toLowerCase().includes('cancel')) {
+        console.warn('[RegulationQuery] OCR 已中止')
+        error.value = null
+        return { success: 0, failed: 0, total: 0, cancelled: true }
+      }
+      error.value = message
       console.error('[RegulationQuery] OCR 处理失败:', err)
       return { success: 0, failed: 0, total: 0 }
+    } finally {
+      progressCleanup?.()
+    }
+  }
+
+  async function cancelOcrProcessing(): Promise<boolean> {
+    try {
+      await invoke<boolean>('regulation_cancel_ocr')
+      return true
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+      console.error('[RegulationQuery] 中止 OCR 失败:', err)
+      return false
     }
   }
 
@@ -894,7 +946,9 @@ export function useRegulationQuery() {
     scanLocalDir,
     scanAllDrives,
     syncCompare,
+    cancelSyncCompare,
     ocrPendingFiles,
+    cancelOcrProcessing,
     refreshDbStatus,
     resetSearch,
     setDocType,

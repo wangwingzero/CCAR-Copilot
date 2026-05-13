@@ -66,9 +66,9 @@ const SUPPORTED_FORMATS: &[&str] = &["png", "jpg", "jpeg", "bmp", "gif", "webp"]
 /// # 示例
 ///
 /// ```no_run
-/// use hugescreenshot_tauri_lib::ocr::preprocessor::load_image;
+/// use ccar_copilot_lib::ocr::preprocessor::load_image;
 ///
-/// # fn main() -> Result<(), hugescreenshot_tauri_lib::ocr::types::OcrError> {
+/// # fn main() -> Result<(), ccar_copilot_lib::ocr::types::OcrError> {
 /// let image = load_image("screenshot.png")?;
 /// println!("图像尺寸: {}x{}", image.width(), image.height());
 /// # Ok(())
@@ -138,7 +138,7 @@ pub fn load_image_from_memory(data: &[u8]) -> Result<DynamicImage, OcrError> {
 /// # 示例
 ///
 /// ```rust
-/// use hugescreenshot_tauri_lib::ocr::preprocessor::resize_image;
+/// use ccar_copilot_lib::ocr::preprocessor::resize_image;
 /// use image::DynamicImage;
 ///
 /// let image = DynamicImage::new_rgba8(4096, 2048);
@@ -590,7 +590,7 @@ pub const RECOGNITION_WIDTH_BUCKETS: [usize; 4] = [160, 320, 640, 1280];
 /// # 示例
 ///
 /// ```rust
-/// use hugescreenshot_tauri_lib::ocr::preprocessor::get_bucket_width;
+/// use ccar_copilot_lib::ocr::preprocessor::get_bucket_width;
 ///
 /// assert_eq!(get_bucket_width(100), 160);
 /// assert_eq!(get_bucket_width(200), 320);

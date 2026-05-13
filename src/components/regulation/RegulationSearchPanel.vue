@@ -17,7 +17,14 @@ import { ask, open as openDialog } from '@tauri-apps/plugin-dialog'
 import { open as openShell } from '@tauri-apps/plugin-shell'
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { addScanFolders, formatFolderName, removeScanFolder } from './scanFolders'
+import {
+  addScanFolders,
+  formatFolderName,
+  loadScanFolders,
+  removeScanFolder,
+  saveScanFolders,
+} from './scanFolders'
+import { resolveResultSnippet } from './resultSnippets'
 
 const appWindow = getCurrentWindow()
 const isMaximized = ref(false)
@@ -175,7 +182,9 @@ const {
   downloadBatchNative,
   processPendingFiles,
   ocrPendingFiles,
+  cancelOcrProcessing,
   syncCompare,
+  cancelSyncCompare,
   refreshDbStatus,
   dbSyncStatus,
   scanLocalDir,
@@ -201,6 +210,7 @@ async function copySyncCommand(): Promise<void> {
 async function startFullSync(): Promise<void> {
   if (isFullSyncing.value) return
   isFullSyncing.value = true
+  isFullSyncCancelRequested.value = false
   fullSyncProgress.value = { stage: 'fetching', current: 0, total: 0, message: '正在启动同步...' }
 
   const { listen } = await import('@tauri-apps/api/event')
@@ -226,11 +236,16 @@ async function startFullSync(): Promise<void> {
     await refreshDbStatus()
     await refreshLocalIndexStats()
   } catch (err) {
+    if (isFullSyncCancelRequested.value || String(err).includes('中止')) {
+      showToast('同步已中止', 'info')
+      return
+    }
     console.error('完整同步失败:', err)
     showToast(`同步失败: ${err}`, 'error')
   } finally {
     unlisten()
     isFullSyncing.value = false
+    isFullSyncCancelRequested.value = false
     fullSyncProgress.value = null
   }
 }
@@ -267,6 +282,10 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#x27;')
+}
+
+function getDisplaySnippet(doc: RegulationDocument): string | undefined {
+  return resolveResultSnippet(doc, getSnippet(doc.url))
 }
 
 // 持久化搜索模式
@@ -324,6 +343,9 @@ const isProcessingFiles = ref(false)
 const isAutoOcrRunning = ref(false)
 const processingStage = ref<'idle' | 'extracting' | 'ocr'>('idle')
 const processingProgressText = ref('')
+const isOcrCancelRequested = ref(false)
+const isSyncCancelRequested = ref(false)
+const isFullSyncCancelRequested = ref(false)
 const isRetryingOcr = ref(false)
 const isRequeueingForMineru = ref(false)
 const isCleaningInvalid = ref(false)
@@ -357,10 +379,12 @@ const processResult = ref<{
   needs_ocr: number
   failed: number
 } | null>(null)
-const scanFolders = ref<string[]>([])
+const scanFolders = ref<string[]>(loadScanFolders())
 const isScanningSelectedFolders = ref(false)
 const currentScanFolder = ref('')
 const showMaintenanceMenu = ref(false)
+
+watch(scanFolders, folders => saveScanFolders(folders), { deep: true })
 
 // 状态统一通过 useRegulationQuery composable 获取（已在上方解构）
 
@@ -498,6 +522,7 @@ async function startBackgroundOcrQueue(reason: string): Promise<void> {
 
   isProcessingFiles.value = true
   isAutoOcrRunning.value = true
+  isOcrCancelRequested.value = false
   processingStage.value = 'ocr'
   processingProgressText.value = `后台 OCR 队列启动：待识别 ${pending} 个`
 
@@ -505,11 +530,13 @@ async function startBackgroundOcrQueue(reason: string): Promise<void> {
   let totalFailed = 0
   let totalProcessed = 0
   let emptyRounds = 0
+  let wasCancelled = false
 
   console.warn(`[RegulationPanel] 后台 OCR 队列启动: ${reason}, pending=${pending}`)
 
   try {
     while (true) {
+      if (isOcrCancelRequested.value) break
       await refreshDbStatus()
       const remaining = dbSyncStatus.value?.pending_ocr ?? 0
       if (remaining <= 0) break
@@ -521,6 +548,12 @@ async function startBackgroundOcrQueue(reason: string): Promise<void> {
         const currentName = current ? `：${current}` : ''
         processingProgressText.value = `后台 OCR ${done}/${total}，剩余约 ${remaining} 个${currentName}`
       })
+
+      if (result.cancelled || isOcrCancelRequested.value) {
+        wasCancelled = true
+        showToast('后台 OCR 已中止', 'info')
+        break
+      }
 
       totalSuccess += result.success
       totalFailed += result.failed
@@ -540,7 +573,7 @@ async function startBackgroundOcrQueue(reason: string): Promise<void> {
       }
     }
 
-    if (totalProcessed > 0) {
+    if (!wasCancelled && totalProcessed > 0) {
       if (searchState.keyword.trim()) {
         await handleSearch()
       }
@@ -555,6 +588,7 @@ async function startBackgroundOcrQueue(reason: string): Promise<void> {
   } finally {
     isAutoOcrRunning.value = false
     isProcessingFiles.value = false
+    isOcrCancelRequested.value = false
     processingStage.value = 'idle'
     processingProgressText.value = ''
   }
@@ -606,17 +640,24 @@ async function handleSearch(): Promise<void> {
   const keyword = searchState.keyword.trim()
   hasSearched.value = keyword.length > 0
   lastSearchKeyword.value = keyword
+  const scopedScanFolders = [...scanFolders.value]
+  const searchOptions = { scanFolders: scopedScanFolders }
 
   switch (searchMode.value) {
     case 'local': {
       // 仅本地搜索
-      const localResults = await searchLocal()
+      const localResults = await searchLocal(searchOptions)
       if (localResults.length > 0) {
         lastSearchSource.value = 'local'
       }
       break
     }
     case 'online':
+      if (scopedScanFolders.length > 0) {
+        await searchLocal(searchOptions)
+        lastSearchSource.value = 'local'
+        break
+      }
       // 仅在线搜索
       lastSearchSource.value = 'online'
       await search()
@@ -624,9 +665,26 @@ async function handleSearch(): Promise<void> {
     case 'hybrid':
     default:
       // 混合搜索：先本地后在线
-      await searchHybrid()
+      await searchHybrid(searchOptions)
       lastSearchSource.value = isLocalIndexReady.value ? 'local' : 'online'
       break
+  }
+}
+
+async function cancelFullSync(): Promise<void> {
+  if (!isFullSyncing.value || isFullSyncCancelRequested.value) return
+  isFullSyncCancelRequested.value = true
+  fullSyncProgress.value = {
+    stage: fullSyncProgress.value?.stage ?? 'cancel',
+    current: fullSyncProgress.value?.current ?? 0,
+    total: fullSyncProgress.value?.total ?? 0,
+    message: '正在中止同步...',
+  }
+  try {
+    await invoke<boolean>('regulation_cancel_full_sync')
+  } catch (err) {
+    console.error('请求中止完整同步失败:', err)
+    showToast(`中止失败: ${err}`, 'error')
   }
 }
 
@@ -696,6 +754,7 @@ async function handleProcessPending(): Promise<void> {
   if (isProcessingFiles.value) return
 
   isProcessingFiles.value = true
+  isOcrCancelRequested.value = false
   processingStage.value = 'extracting'
   processingProgressText.value = ''
   processResult.value = null
@@ -716,6 +775,11 @@ async function handleProcessPending(): Promise<void> {
       const ocrResult = await ocrPendingFiles(result.needs_ocr, (current, done, total) => {
         processingProgressText.value = `${done}/${total} ${current}`
       })
+
+      if (ocrResult.cancelled || isOcrCancelRequested.value) {
+        showToast('OCR 已中止，未处理的文件会保留在待 OCR 队列', 'info')
+        return
+      }
 
       await refreshDbStatus()
       await refreshLocalIndexStats()
@@ -743,11 +807,37 @@ async function handleProcessPending(): Promise<void> {
   } catch (err) {
     showToast(`处理失败: ${err}`, 'error')
   } finally {
+    const shouldResumeBackground = !isOcrCancelRequested.value
     isProcessingFiles.value = false
+    isOcrCancelRequested.value = false
     processingStage.value = 'idle'
     processingProgressText.value = ''
-    void startBackgroundOcrQueue('manual-process')
+    if (shouldResumeBackground) {
+      void startBackgroundOcrQueue('manual-process')
+    }
   }
+}
+
+async function handleCancelOcr(): Promise<void> {
+  if (!isProcessingFiles.value || processingStage.value !== 'ocr' || isOcrCancelRequested.value) {
+    return
+  }
+  isOcrCancelRequested.value = true
+  processingProgressText.value = '正在中止 OCR...'
+  const ok = await cancelOcrProcessing()
+  if (ok) {
+    showToast('已请求中止 OCR，当前页/当前文件结束后会停止', 'info')
+  } else {
+    showToast('请求中止 OCR 失败', 'error')
+  }
+}
+
+async function handleProcessPendingAction(): Promise<void> {
+  if (isProcessingFiles.value && processingStage.value === 'ocr') {
+    await handleCancelOcr()
+    return
+  }
+  await handleProcessPending()
 }
 
 // 打开 OCR 引擎重做对话框：加载各引擎统计后弹窗
@@ -886,14 +976,14 @@ async function handleRetryFailedOcr(): Promise<void> {
   }
 }
 
-// 清理无效的规章记录：后缀非 .pdf 或文件物理不存在
+// 清理无效的规章记录：后缀不是 PDF/TXT 或文件物理不存在
 // 这些记录无论怎么重试 OCR 都不可能成功，需要从数据库/索引中移除
 async function handleCleanInvalid(): Promise<void> {
   if (isCleaningInvalid.value) return
 
   const confirmed = await ask(
     '将从数据库 + 索引中删除以下两类无效规章记录：\n\n' +
-      '• 文件后缀不是 .pdf（例如 .txt/.doc 历史遗留）\n' +
+      '• 文件后缀不是 .pdf/.txt（例如 .doc/.docx 历史遗留）\n' +
       '• 数据库中登记的路径在磁盘上已经不存在\n\n' +
       '⚠️ 此操作不可撤销，但不会删除磁盘上的实际文件。\n\n' +
       '是否继续？',
@@ -917,7 +1007,7 @@ async function handleCleanInvalid(): Promise<void> {
     } else {
       showToast(
         `清理完成: 共 ${result.deletedFromDb} 条 ` +
-          `(非 PDF ${result.nonPdfCount}, 文件丢失 ${result.missingFileCount})`,
+          `(不支持类型 ${result.nonPdfCount}, 文件丢失 ${result.missingFileCount})`,
         'success'
       )
     }
@@ -931,14 +1021,14 @@ async function handleCleanInvalid(): Promise<void> {
   }
 }
 
-// 一键对齐 PDF 文件名：把磁盘上的 <hash>.pdf 改为「文号_标题.pdf」
+// 一键对齐 PDF/TXT 文件名：把磁盘上的 <hash>.ext 改为「文号_标题.ext」
 async function handleRealignFilenames(): Promise<void> {
   if (isRealigningFilenames.value) return
 
   const confirmed = await ask(
-    '将批量重命名磁盘上的 PDF 文件为可读格式：\n\n' +
-      '• 优先使用「文号_标题.pdf」\n' +
-      '• 缺失文号时使用「标题.pdf」\n' +
+    '将批量重命名磁盘上的 PDF/TXT 文件为可读格式：\n\n' +
+      '• 优先使用「文号_标题.ext」\n' +
+      '• 缺失文号时使用「标题.ext」\n' +
       '• 遇到重名会自动追加 sha256 短缀\n\n' +
       '本操作会同步更新数据库 file_path 和搜索索引，\n' +
       '不会移动文件到其它目录，仅在原目录内 rename。\n\n' +
@@ -949,6 +1039,10 @@ async function handleRealignFilenames(): Promise<void> {
 
   isRealigningFilenames.value = true
   try {
+    if (!isLocalIndexReady.value) {
+      await initLocalIndex()
+    }
+
     const result = await invoke<{
       totalScanned: number
       skippedInvalid: number
@@ -981,6 +1075,10 @@ async function handleRealignFilenames(): Promise<void> {
     }
 
     await refreshDbStatus()
+    await refreshLocalIndexStats()
+    if (searchState.keyword.trim()) {
+      await handleSearch()
+    }
   } catch (err) {
     showToast(`对齐失败: ${err}`, 'error')
   } finally {
@@ -990,12 +1088,21 @@ async function handleRealignFilenames(): Promise<void> {
 
 // 同步对比官网
 async function handleSyncCompare(): Promise<void> {
-  if (isSyncing.value) return
-  const result = await syncCompare('all', 20, true)
-  if (!result) {
-    showToast('同步失败，请稍后重试', 'error')
+  if (isSyncing.value) {
+    if (isSyncCancelRequested.value) return
+    isSyncCancelRequested.value = true
+    const ok = await cancelSyncCompare()
+    showToast(ok ? '已请求中止同步' : '请求中止同步失败', ok ? 'info' : 'error')
     return
   }
+  isSyncCancelRequested.value = false
+  const result = await syncCompare('all', 20, true)
+  if (!result) {
+    showToast(isSyncCancelRequested.value ? '同步已中止' : '同步失败，请稍后重试', isSyncCancelRequested.value ? 'info' : 'error')
+    isSyncCancelRequested.value = false
+    return
+  }
+  isSyncCancelRequested.value = false
 
   const downloaded = result.downloaded ?? 0
   const failed = result.download_failed ?? 0
@@ -1293,6 +1400,13 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
           ></div>
         </div>
       </div>
+      <button
+        class="sync-btn-default"
+        :disabled="isFullSyncCancelRequested"
+        @click="cancelFullSync"
+      >
+        {{ isFullSyncCancelRequested ? '中止中...' : '中止同步' }}
+      </button>
     </div>
 
     <!-- 同步命令对话框 -->
@@ -1518,7 +1632,7 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
         <button
           class="action-btn primary"
           :disabled="isScanning || isScanningSelectedFolders"
-          title="选择本地文件夹,程序会递归收集 PDF 并加入索引"
+          title="选择本地文件夹,程序会递归收集 PDF / TXT 并加入索引"
           @click="handleAddScanFolder"
         >
           <span class="action-icon" aria-hidden="true">📁</span>
@@ -1526,20 +1640,26 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
         </button>
         <button
           class="action-btn"
-          :disabled="isProcessingFiles"
+          :disabled="isProcessingFiles && processingStage !== 'ocr'"
           title="先提取 PDF 自带文字;扫描件会自动进入 OCR 识别并写入索引"
-          @click="handleProcessPending"
+          @click="handleProcessPendingAction"
         >
-          {{ processPendingButtonLabel }}
+          {{
+            isProcessingFiles && processingStage === 'ocr'
+              ? isOcrCancelRequested
+                ? '中止中...'
+                : '中止 OCR'
+              : processPendingButtonLabel
+          }}
         </button>
         <button
           class="action-btn"
-          :disabled="isSyncing"
+          :class="{ warning: isSyncing }"
           title="从 CAAC 官网全量爬取规章列表,与本地对比差异"
           @click="handleSyncCompare"
         >
           <span class="action-icon" aria-hidden="true">↻</span>
-          {{ isSyncing ? '同步中...' : '同步对比官网' }}
+          {{ isSyncing ? (isSyncCancelRequested ? '中止中...' : '中止同步') : '同步对比官网' }}
         </button>
 
         <div class="action-spacer"></div>
@@ -1568,7 +1688,7 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
           <span class="maint-name">{{
             isRealigningFilenames ? '对齐中...' : '一键对齐文件名'
           }}</span>
-          <span class="maint-desc">把磁盘上的 hash 文件名批量重命名为「文号_标题.pdf」</span>
+          <span class="maint-desc">把磁盘上的 hash 文件名批量重命名为「文号_标题.ext」</span>
         </button>
         <button
           class="maintenance-item"
@@ -1601,7 +1721,7 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
           @click="handleCleanInvalid"
         >
           <span class="maint-name">{{ isCleaningInvalid ? '清理中...' : '清理无效记录' }}</span>
-          <span class="maint-desc">删除磁盘已不存在或后缀非 .pdf 的残留(重试永远失败的记录)</span>
+          <span class="maint-desc">删除磁盘已不存在或后缀不是 PDF/TXT 的残留记录</span>
         </button>
       </div>
 
@@ -1635,8 +1755,8 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
           <div class="scan-folder-empty-text">
             <p class="scan-folder-empty-title">还没添加扫描文件夹</p>
             <p class="scan-folder-empty-hint">
-              点上方「<strong>📁 添加并扫描本地文件夹</strong>」按钮选择 PDF
-              所在目录,程序会递归收集所有 PDF 加入索引
+              点上方「<strong>📁 添加并扫描本地文件夹</strong>」按钮选择 PDF/TXT
+              所在目录,程序会递归收集所有 PDF/TXT 加入索引
             </p>
           </div>
         </div>
@@ -1974,9 +2094,9 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
 
             <!-- eslint-disable vue/no-v-html -- 已通过 sanitizeHtml() 白名单消毒，仅保留 b/em/mark 标签 -->
             <div
-              v-if="showSnippets && getSnippet(doc.url)"
+              v-if="showSnippets && getDisplaySnippet(doc)"
               class="card-snippet"
-              v-html="sanitizeHtml(getSnippet(doc.url)!)"
+              v-html="sanitizeHtml(getDisplaySnippet(doc)!)"
             ></div>
             <!-- eslint-enable vue/no-v-html -->
           </div>
@@ -3098,11 +3218,10 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
   font-size: 12px;
   line-height: 1.6;
   color: var(--text-secondary, #888);
-  /* v0.1.6: 由 80px (~4 行) 放宽到 132px (~7 行)，配合后端 240 字符上限，
-     能完整展示关键词附近一整段上下文 */
-  max-height: 132px;
+  /* 放宽到约 11 行，配合后端 420 字符摘要，避免只看到半句上下文 */
+  max-height: 212px;
   overflow: hidden;
-  word-break: break-all;
+  word-break: break-word;
 }
 
 .card-snippet :deep(mark) {
@@ -3212,6 +3331,17 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
 
 .action-bar .action-btn.primary:hover:not(:disabled) {
   background: #52c41a;
+  color: white;
+}
+
+.action-bar .action-btn.warning {
+  border-color: #ff4d4f;
+  color: #ff4d4f;
+  background: rgba(255, 77, 79, 0.06);
+}
+
+.action-bar .action-btn.warning:hover:not(:disabled) {
+  background: #ff4d4f;
   color: white;
 }
 

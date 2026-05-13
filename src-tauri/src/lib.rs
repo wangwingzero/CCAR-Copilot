@@ -44,7 +44,7 @@ use crate::database::settings::{
     get_cached_config, get_config_path, init_config, save_config, AppConfig,
 };
 use crate::logging::{cleanup_old_logs, setup_logging_with_config, LogConfig};
-use crate::regulation::RegulationIndexState;
+use crate::regulation::{RegulationIndexState, RegulationTaskCancelState};
 
 /// 运行 Tauri 应用
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -201,6 +201,9 @@ pub fn run() {
                 let regulation_index_state = RegulationIndexState::default();
                 app.manage(regulation_index_state);
 
+                let regulation_task_cancel_state = RegulationTaskCancelState::default();
+                app.manage(regulation_task_cancel_state);
+
                 let batch_download_state = regulation::BatchDownloadState::default();
                 app.manage(batch_download_state);
 
@@ -266,6 +269,7 @@ pub fn run() {
             commands::update_cmd::get_current_version,
             commands::update_cmd::get_update_config,
             commands::update_cmd::set_update_config,
+            commands::update_cmd::get_latest_update_download_url,
             // 托盘命令
             commands::tray_cmd::set_tray_state,
             commands::tray_cmd::show_main_window,
@@ -301,8 +305,10 @@ pub fn run() {
             // 规章同步对比命令
             regulation::regulation_sync_compare,
             regulation::regulation_sync_compare_online,
+            regulation::regulation_cancel_sync_compare,
             regulation::regulation_check_server_manifest,
             regulation::regulation_full_sync_from_server,
+            regulation::regulation_cancel_full_sync,
             // 规章在线搜索命令
             regulation::regulation_online_search,
             regulation::regulation_fetch_all_online,
@@ -315,6 +321,7 @@ pub fn run() {
             regulation::regulation_import_legacy_data,
             // 规章 OCR 处理命令
             regulation::regulation_ocr_pending,
+            regulation::regulation_cancel_ocr,
             regulation::regulation_ocr_update,
             regulation::regulation_get_ocr_queue,
             regulation::regulation_retry_failed_ocr,

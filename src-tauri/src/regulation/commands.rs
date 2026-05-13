@@ -4,7 +4,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -53,6 +54,9 @@ pub struct SearchRequest {
     /// 截止发布日期（YYYY-MM-DD，空字符串表示不限）
     #[serde(default)]
     pub end_date: String,
+    /// 限制本地搜索结果必须位于这些扫描目录内
+    #[serde(default)]
+    pub scan_folders: Vec<String>,
     /// 返回数量限制
     #[serde(default = "default_limit")]
     pub limit: usize,
@@ -153,11 +157,11 @@ fn normalize_extension(original_name: Option<&str>, default_ext: &str) -> String
 /// 解析目标存储路径。
 ///
 /// `RegisterOnly` 模式直接返回原路径（不复制）。
-/// `CopyThenRegister` 模式按 [`build_pretty_filename`] 规则生成「文号_标题.pdf」
+/// `CopyThenRegister` 模式按 [`build_pretty_filename`] 规则生成「文号_标题.ext」
 /// 风格的文件名，并通过 [`dedupe_filename`] 解决重名冲突。
 ///
 /// 旧版本一律使用 `<sha256前16字符>.pdf`，会让用户在文件管理器里看到
-/// `00d305aa24de6e30.pdf` 这种不可读名字；新版规则与官网下载保持一致。
+/// `00d305aa24de6e30.pdf` 这种不可读名字；新版规则保留源扩展名并与官网下载保持一致。
 fn resolve_storage_path(
     source_path: &Path,
     sha256: &str,
@@ -368,11 +372,18 @@ pub async fn regulation_local_search(
     let doc_type = if request.doc_type == "all" { None } else { Some(request.doc_type.as_str()) };
 
     let has_date_filter = !request.start_date.is_empty() || !request.end_date.is_empty();
+    let scan_folder_filter = normalize_scan_folder_filters(&request.scan_folders);
+    let has_scan_folder_filter = !scan_folder_filter.is_empty();
     let needs_validity_post_filter = matches!(request.validity.as_str(), "valid" | "invalid");
-    let needs_post_filter = needs_validity_post_filter || has_date_filter;
+    let needs_post_filter =
+        needs_validity_post_filter || has_date_filter || has_scan_folder_filter;
 
     let mut results = if needs_post_filter {
-        let expanded_limit = request.limit.saturating_mul(5).max(request.limit);
+        let expanded_limit = if has_scan_folder_filter {
+            usize::try_from(index.doc_count()).unwrap_or(usize::MAX).max(request.limit)
+        } else {
+            request.limit.saturating_mul(5).max(request.limit)
+        };
         // validity 走后过滤时，索引层不传 validity；否则保留索引层 validity 过滤
         let index_validity = if needs_validity_post_filter { None } else { validity };
         let mut candidates = index
@@ -401,6 +412,12 @@ pub async fn regulation_local_search(
             });
         }
 
+        if has_scan_folder_filter {
+            candidates.retain(|doc| {
+                is_document_in_normalized_scan_folders(doc, &scan_folder_filter)
+            });
+        }
+
         candidates.truncate(request.limit);
         candidates
     } else {
@@ -423,13 +440,11 @@ pub async fn regulation_local_search(
     let elapsed = start.elapsed();
     let total = results.len();
 
-    // 生成正文摘要（240 字符限制）
+    // 生成正文摘要（420 字符限制）
     //
-    // v0.1.6 之前是 150 字符,用户反馈太少看不全关键词上下文。240 字符约 5-7
-    // 行中文,既能完整展示一段关键词附近的句子,又不会让搜索结果列表过于臃肿。
-    // 前端 CSS `.card-snippet` 的 max-height 同步放宽到 132px (约 7 行 12px
-    // 字号、line-height 1.6)。
-    let snippets = generate_snippets(&results, &request.query, 240);
+    // 240 字符在长标题 / 长句 PDF 里仍然经常只能看到半句上下文，
+    // 这里再放宽到 420 字符，前端同步提高展示高度，让搜索结果能带出更完整的段落。
+    let snippets = generate_snippets(&results, &request.query, 420);
 
     // 清空 documents 中的 content 字段（不把完整正文发给前端）
     for doc in &mut results {
@@ -1369,7 +1384,12 @@ fn ocr_single_file<R: tauri::Runtime>(
     conn: &rusqlite::Connection,
     index_state: &State<'_, RegulationIndexState>,
     file: &regulation_db::RegulationFile,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> bool {
+    if cancel_flag.as_ref().is_some_and(cancel_requested) {
+        return false;
+    }
+
     // 更新状态为 processing
     let _ = regulation_db::update_ocr_status(conn, file.id, "processing", 0, 0, None);
 
@@ -1399,9 +1419,10 @@ fn ocr_single_file<R: tauri::Runtime>(
     let app_clone = app.clone();
     let file_title = file.title.clone();
 
-    match super::pdf_ocr::ocr_pdf(
+    match super::pdf_ocr::ocr_pdf_with_cancel(
         &file.file_path,
         50,
+        cancel_flag,
         Some(&|current_page, total_pages| {
             if let Err(e) = app_clone.emit(
                 "regulation:ocr-progress",
@@ -1447,6 +1468,18 @@ fn ocr_single_file<R: tauri::Runtime>(
             false
         }
         Err(e) => {
+            if matches!(e, super::pdf_ocr::PdfOcrError::Cancelled) {
+                let _ = regulation_db::update_ocr_status(
+                    conn,
+                    file.id,
+                    "pending",
+                    0,
+                    0,
+                    Some("OCR 已中止，等待下次处理"),
+                );
+                info!("OCR 已中止: {}", file.title);
+                return false;
+            }
             let _ = regulation_db::update_ocr_status(
                 conn,
                 file.id,
@@ -1481,10 +1514,15 @@ async fn ocr_single_file_with_online_fallback<R: tauri::Runtime>(
     index_state: &State<'_, RegulationIndexState>,
     file: &regulation_db::RegulationFile,
     mineru_options: Option<&super::mineru_ocr::MineruOcrOptions>,
+    cancel_flag: Arc<AtomicBool>,
 ) -> bool {
+    if cancel_requested(&cancel_flag) {
+        return false;
+    }
+
     if mineru_options.is_none() {
         return match open_regulation_db(app) {
-            Ok(conn) => ocr_single_file(app, &conn, index_state, file),
+            Ok(conn) => ocr_single_file(app, &conn, index_state, file, Some(cancel_flag)),
             Err(e) => {
                 warn!("打开数据库失败，无法执行本地 OCR: {} - {}", file.title, e);
                 false
@@ -1521,6 +1559,10 @@ async fn ocr_single_file_with_online_fallback<R: tauri::Runtime>(
         Ok(_) | Err(_) => {}
     }
 
+    if cancel_requested(&cancel_flag) {
+        return false;
+    }
+
     if let Some(options) = mineru_options {
         if let Ok(conn) = open_regulation_db(app) {
             let _ = regulation_db::update_ocr_status(&conn, file.id, "processing", 0, 0, None);
@@ -1534,7 +1576,13 @@ async fn ocr_single_file_with_online_fallback<R: tauri::Runtime>(
         );
 
         info!("使用 MinerU 在线 OCR 处理: {}", file.title);
-        match super::mineru_ocr::ocr_pdf_to_markdown(pdf_path, options).await {
+        match super::mineru_ocr::ocr_pdf_to_markdown_with_cancel(
+            pdf_path,
+            options,
+            cancel_flag.clone(),
+        )
+        .await
+        {
             Ok(text) if !text.trim().is_empty() => {
                 match open_regulation_db(app)
                     .and_then(|conn| write_to_index(index_state, &conn, file, text, "mineru"))
@@ -1552,13 +1600,31 @@ async fn ocr_single_file_with_online_fallback<R: tauri::Runtime>(
                 warn!("MinerU 在线 OCR 返回空文本，回退本地 OCR: {}", file.title);
             }
             Err(e) => {
+                if cancel_requested(&cancel_flag) {
+                    if let Ok(conn) = open_regulation_db(app) {
+                        let _ = regulation_db::update_ocr_status(
+                            &conn,
+                            file.id,
+                            "pending",
+                            0,
+                            0,
+                            Some("OCR 已中止，等待下次处理"),
+                        );
+                    }
+                    info!("MinerU 在线 OCR 已中止: {}", file.title);
+                    return false;
+                }
                 warn!("MinerU 在线 OCR 失败，回退本地 OCR: {} - {}", file.title, e);
             }
         }
     }
 
+    if cancel_requested(&cancel_flag) {
+        return false;
+    }
+
     match open_regulation_db(app) {
-        Ok(conn) => ocr_single_file(app, &conn, index_state, file),
+        Ok(conn) => ocr_single_file(app, &conn, index_state, file, Some(cancel_flag)),
         Err(e) => {
             warn!("打开数据库失败，无法执行本地 OCR: {} - {}", file.title, e);
             false
@@ -1566,12 +1632,12 @@ async fn ocr_single_file_with_online_fallback<R: tauri::Runtime>(
     }
 }
 
-/// 处理 PDF 文件列表：去重、文本提取、入库、入索引
+/// 处理本地法规文件列表：去重、文本提取、入库、入索引
 ///
 /// 返回 `(new_files, duplicates, indexed, needs_ocr, failed)`
-fn process_pdf_batch<R: tauri::Runtime>(
+fn process_local_file_batch<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    pdf_files: &[PathBuf],
+    source_files: &[PathBuf],
     conn: &rusqlite::Connection,
     index_state: &State<'_, RegulationIndexState>,
     existing_hashes: &HashSet<String>,
@@ -1579,7 +1645,7 @@ fn process_pdf_batch<R: tauri::Runtime>(
     copy_mode: LocalCopyMode,
     target_dir: &Path,
 ) -> Result<(usize, usize, usize, usize, usize), String> {
-    let total_found = pdf_files.len();
+    let total_found = source_files.len();
     let mut new_files = 0;
     let mut duplicates = 0;
     let mut indexed = 0;
@@ -1588,16 +1654,16 @@ fn process_pdf_batch<R: tauri::Runtime>(
     let mut batch_docs = Vec::new();
     let batch_commit_size = 20;
 
-    for (i, pdf_path) in pdf_files.iter().enumerate() {
-        let filename = pdf_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let file_path_str = pdf_path.to_string_lossy().to_string();
+    for (i, source_path) in source_files.iter().enumerate() {
+        let filename = source_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let file_path_str = source_path.to_string_lossy().to_string();
+        let is_pdf = is_pdf_path(source_path);
+        let is_txt = is_txt_path(source_path);
 
-        // 防御性扩展名校验：非 .pdf 一律跳过，避免历史上把 .txt/.doc 等
-        // 误录入 regulation_files 后续被 pdfium 当 PDF 解析报 FormatError。
-        // `collect_pdf_files` 已经做过同样过滤，这里是双重保险，防御未来从其他
-        // 调用路径传入非 PDF 文件。
-        if !is_pdf_path(pdf_path) {
-            warn!("跳过非 PDF 文件: {}", file_path_str);
+        // 防御性扩展名校验：仅允许 PDF / TXT，避免历史上把 .doc/.docx 等
+        // 误录入 regulation_files 后续被 OCR / 清理流程误处理。
+        if !is_supported_local_scan_path(source_path) {
+            warn!("跳过不支持的本地法规文件: {}", file_path_str);
             continue;
         }
 
@@ -1630,7 +1696,7 @@ fn process_pdf_batch<R: tauri::Runtime>(
         }
 
         // 计算 SHA256
-        let sha256 = match calculate_file_hash(pdf_path) {
+        let sha256 = match calculate_file_hash(source_path) {
             Ok(hash) => hash,
             Err(e) => {
                 failed += 1;
@@ -1651,7 +1717,7 @@ fn process_pdf_batch<R: tauri::Runtime>(
 
         // 计算存储路径（CopyThenRegister 模式使用 doc_number_title 规则命名）
         let stored_path = match resolve_storage_path(
-            pdf_path,
+            source_path,
             &sha256,
             Some(doc_number.as_str()),
             Some(title.as_str()),
@@ -1670,23 +1736,35 @@ fn process_pdf_batch<R: tauri::Runtime>(
         // 获取文件大小
         let file_size = std::fs::metadata(&stored_path).map(|m| m.len() as i64).unwrap_or(0);
 
-        // 提取 PDF 文本
-        let (content, text_status, text_needs_ocr) =
+        let (content, text_status, text_needs_ocr, initial_engine) = if is_txt {
+            match load_local_text_content(&stored_path) {
+                Ok(content) => (content, "done", false, "plain_text"),
+                Err(e) => {
+                    failed += 1;
+                    warn!("读取文本文件失败: {} - {}", filename, e);
+                    continue;
+                }
+            }
+        } else if is_pdf {
             match text_extractor::extract_text_from_pdf(&stored_path) {
-                Ok(extraction) if !extraction.needs_ocr => (extraction.text, "done", false),
-                Ok(extraction) => (extraction.text, "pending", true),
+                Ok(extraction) if !extraction.needs_ocr => (extraction.text, "done", false, "pdfium"),
+                Ok(extraction) => (extraction.text, "pending", true, "unknown"),
                 Err(e) => {
                     debug!("文本提取失败: {} - {}", filename, e);
-                    (String::new(), "pending", true)
+                    (String::new(), "pending", true, "unknown")
                 }
-            };
+            }
+        } else {
+            failed += 1;
+            warn!("无法识别本地法规文件类型: {}", file_path_str);
+            continue;
+        };
 
         let file_url = format!("file:///{}", stored_path_str.replace('\\', "/"));
 
         // 插入数据库
-        // 注意：若 pdfium 提取成功（text_status="done"），记录引擎为 pdfium；
-        //       否则保持 unknown，后续 OCR 成功时由 write_to_index 更新
-        let initial_engine = if text_needs_ocr { "unknown" } else { "pdfium" };
+        // PDF 直接提取成功时记录为 pdfium，TXT 直接记为 plain_text，
+        // 其余待 OCR 的文件保持 unknown，后续 OCR 成功时由 write_to_index 更新。
         let db_file = regulation_db::RegulationFile {
             title: title.clone(),
             doc_number: doc_number.clone(),
@@ -1705,7 +1783,7 @@ fn process_pdf_batch<R: tauri::Runtime>(
         match regulation_db::insert_file(conn, &db_file) {
             Ok(file_id) => {
                 new_files += 1;
-                if !text_needs_ocr && !content.is_empty() {
+                if !text_needs_ocr {
                     let reg_doc = super::schema::RegulationDocument {
                         title,
                         doc_number,
@@ -1808,7 +1886,7 @@ fn run_auto_ocr<R: tauri::Runtime>(
             debug!("发送 OCR 进度事件失败: {}", e);
         }
 
-        if ocr_single_file(app, conn, index_state, file) {
+        if ocr_single_file(app, conn, index_state, file, None) {
             ocr_success += 1;
         } else {
             ocr_failed += 1;
@@ -1828,7 +1906,7 @@ fn run_auto_ocr<R: tauri::Runtime>(
 pub struct ScanProgress {
     /// 已扫描文件数
     pub scanned: usize,
-    /// 发现的 PDF 文件总数
+    /// 发现的受支持文件总数（PDF / TXT）
     pub total_found: usize,
     /// 新文件数（非重复）
     pub new_files: usize,
@@ -1855,7 +1933,7 @@ pub struct ScanProgress {
 /// 扫描结果
 #[derive(Debug, Serialize)]
 pub struct ScanResponse {
-    /// 发现的 PDF 文件总数
+    /// 发现的受支持文件总数（PDF / TXT）
     pub total_found: usize,
     /// 新文件数
     pub new_files: usize,
@@ -1867,7 +1945,7 @@ pub struct ScanResponse {
     pub needs_ocr: usize,
     /// 失败数
     pub failed: usize,
-    /// 非 PDF 文件数（跳过）
+    /// 不支持的文件数（保留兼容字段名）
     pub skipped_non_pdf: usize,
     /// OCR 成功索引数
     pub ocr_success: usize,
@@ -1966,6 +2044,99 @@ fn is_effectively_invalid(doc: &RegulationDocument) -> bool {
     INVALID_VALIDITY_LABELS.contains(&doc.validity.trim()) || infer_document_validity(doc).is_some()
 }
 
+/// 长任务取消状态（Tauri 管理）。
+///
+/// Tauri command 本身不能从前端直接 abort；前端点击“中止”时设置这些标记，
+/// 后端长循环在安全边界检查并尽快退出。
+pub struct RegulationTaskCancelState {
+    pub ocr: Arc<AtomicBool>,
+    pub sync_compare: Arc<AtomicBool>,
+    pub full_sync: Arc<AtomicBool>,
+}
+
+impl Default for RegulationTaskCancelState {
+    fn default() -> Self {
+        Self {
+            ocr: Arc::new(AtomicBool::new(false)),
+            sync_compare: Arc::new(AtomicBool::new(false)),
+            full_sync: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+fn cancel_requested(flag: &Arc<AtomicBool>) -> bool {
+    flag.load(Ordering::Relaxed)
+}
+
+fn reset_cancel_flag(flag: &Arc<AtomicBool>) {
+    flag.store(false, Ordering::Relaxed);
+}
+
+async fn wait_for_cancel(flag: Arc<AtomicBool>) {
+    while !cancel_requested(&flag) {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+}
+
+fn normalize_scan_filter_path(path: &str) -> String {
+    let mut normalized = path.trim().replace('/', "\\");
+
+    while normalized.len() > 3 && normalized.ends_with('\\') {
+        normalized.pop();
+    }
+
+    normalized.to_lowercase()
+}
+
+fn normalize_scan_folder_filters(scan_folders: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for folder in scan_folders {
+        let path = normalize_scan_filter_path(folder);
+        if path.is_empty() || !seen.insert(path.clone()) {
+            continue;
+        }
+        normalized.push(path);
+    }
+
+    normalized
+}
+
+fn is_document_in_normalized_scan_folders(
+    doc: &RegulationDocument,
+    normalized_scan_folders: &[String],
+) -> bool {
+    if normalized_scan_folders.is_empty() {
+        return true;
+    }
+
+    let file_path = normalize_scan_filter_path(&doc.file_path);
+    if file_path.is_empty() {
+        return false;
+    }
+
+    normalized_scan_folders.iter().any(|folder| {
+        if file_path == *folder {
+            return true;
+        }
+
+        if folder.ends_with('\\') {
+            file_path.starts_with(folder)
+        } else {
+            file_path
+                .strip_prefix(folder.as_str())
+                .is_some_and(|rest| rest.starts_with('\\'))
+        }
+    })
+}
+
+#[cfg(test)]
+fn is_document_in_scan_folders(doc: &RegulationDocument, scan_folders: &[String]) -> bool {
+    let normalized = normalize_scan_folder_filters(scan_folders);
+    is_document_in_normalized_scan_folders(doc, &normalized)
+}
+
 #[cfg(test)]
 mod validity_tests {
     use super::*;
@@ -2001,6 +2172,25 @@ mod validity_tests {
 
         assert!(!is_effectively_invalid(&doc));
     }
+
+    #[test]
+    fn scan_folder_filter_matches_only_inside_selected_roots() {
+        let mut doc = doc("CCAR-121", "有效");
+        doc.file_path = r"D:\Regs\CCAR-121.pdf".to_string();
+
+        assert!(is_document_in_scan_folders(&doc, &[r"D:\Regs".to_string()]));
+        assert!(is_document_in_scan_folders(&doc, &[r"D:/Regs/".to_string()]));
+        assert!(!is_document_in_scan_folders(&doc, &[r"D:\Regs-old".to_string()]));
+    }
+
+    #[test]
+    fn scan_folder_filter_ignores_empty_filter_list() {
+        let mut doc = doc("CCAR-121", "有效");
+        doc.file_path = r"D:\Regs\CCAR-121.pdf".to_string();
+
+        assert!(is_document_in_scan_folders(&doc, &[]));
+        assert!(is_document_in_scan_folders(&doc, &[" ".to_string()]));
+    }
 }
 
 /// 应跳过的 Windows 系统/保护目录（小写匹配）
@@ -2032,8 +2222,8 @@ const SKIP_DIRS: &[&str] = &[
 
 /// 判断给定路径的扩展名是否为 PDF（大小写不敏感）。
 ///
-/// 该函数同时被 `collect_pdf_files` 与 `process_pdf_batch` 使用，
-/// 也是 `regulation_cleanup_invalid_files` 命令判定残留记录的核心规则。
+/// 该函数用于 PDF 专属流程；本地扫描的完整支持范围见
+/// [`is_supported_local_scan_path`]。
 pub(crate) fn is_pdf_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -2041,10 +2231,58 @@ pub(crate) fn is_pdf_path(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 递归收集目录下的所有 PDF 文件
+fn is_txt_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("txt"))
+        .unwrap_or(false)
+}
+
+fn is_supported_local_scan_path(path: &std::path::Path) -> bool {
+    is_pdf_path(path) || is_txt_path(path)
+}
+
+fn is_supported_realign_filename_path(path: &std::path::Path) -> bool {
+    is_supported_local_scan_path(path)
+}
+
+fn is_invalid_regulation_file_record(path: &std::path::Path) -> bool {
+    path.as_os_str().is_empty() || !is_supported_local_scan_path(path) || !path.exists()
+}
+
+fn load_local_text_content(path: &std::path::Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("读取文本文件失败: {}", e))?;
+    let mut content = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        String::from_utf8_lossy(&bytes[3..]).into_owned()
+    } else if bytes.starts_with(&[0xFF, 0xFE]) {
+        let (decoded, _, _) = encoding_rs::UTF_16LE.decode(&bytes[2..]);
+        decoded.into_owned()
+    } else if bytes.starts_with(&[0xFE, 0xFF]) {
+        let (decoded, _, _) = encoding_rs::UTF_16BE.decode(&bytes[2..]);
+        decoded.into_owned()
+    } else {
+        match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(err) => {
+                let bytes = err.into_bytes();
+                let (decoded, _, _) = encoding_rs::GBK.decode(&bytes);
+                decoded.into_owned()
+            }
+        }
+    };
+    if content.starts_with('\u{feff}') {
+        content = content.trim_start_matches('\u{feff}').to_string();
+    }
+    Ok(content)
+}
+
+/// 递归收集目录下的所有受支持文件（PDF / TXT）
 ///
 /// 使用 walkdir 遍历，自动跳过系统保护目录和符号链接，权限错误静默处理。
-fn collect_pdf_files(dir: &std::path::Path, recursive: bool) -> Vec<std::path::PathBuf> {
+fn collect_supported_local_files(
+    dir: &std::path::Path,
+    recursive: bool,
+) -> Vec<std::path::PathBuf> {
     let max_depth = if recursive { usize::MAX } else { 1 };
 
     WalkDir::new(dir)
@@ -2064,7 +2302,7 @@ fn collect_pdf_files(dir: &std::path::Path, recursive: bool) -> Vec<std::path::P
         .filter_map(|entry_result| match entry_result {
             Ok(entry) => {
                 let path = entry.into_path();
-                if path.is_file() && is_pdf_path(&path) {
+                if path.is_file() && is_supported_local_scan_path(&path) {
                     return Some(path);
                 }
                 None
@@ -2078,7 +2316,7 @@ fn collect_pdf_files(dir: &std::path::Path, recursive: bool) -> Vec<std::path::P
         .collect()
 }
 
-/// 扫描本地目录，将 PDF 文件入库 + 入索引 + 自动 OCR
+/// 扫描本地目录，将本地法规文件入库 + 入索引 + 自动 OCR
 ///
 /// # 参数
 /// - `dir_path`: 要扫描的目录路径
@@ -2086,11 +2324,11 @@ fn collect_pdf_files(dir: &std::path::Path, recursive: bool) -> Vec<std::path::P
 /// - `auto_ocr`: 是否自动对扫描版 PDF 执行 OCR（默认 true）
 ///
 /// # 流程
-/// 1. 递归遍历目录，收集所有 PDF 文件
+/// 1. 递归遍历目录，收集所有受支持文件（PDF / TXT）
 /// 2. 对每个文件计算 SHA256
 /// 3. 数据库去重检查（同哈希 = 同文件，跳过）
 /// 4. 从文件名智能解析文号、类型等元数据
-/// 5. 用 pdfium-render 提取文本
+/// 5. 对 PDF 用 pdfium-render 提取文本；TXT 直接读取正文
 /// 6. 写入 SQLite (regulation_files) + Tantivy 索引
 /// 7. 对文本不足的扫描版 PDF 自动执行 OCR（PP-OCRv4）
 /// 8. 实时通过 Tauri event "regulation:scan-progress" 报告进度
@@ -2118,7 +2356,7 @@ pub async fn regulation_scan_local_dir<R: tauri::Runtime>(
         return Err(format!("目录不存在或不是目录: {}", dir_path));
     }
 
-    // Phase 1: 发现所有 PDF 文件
+    // Phase 1: 发现所有受支持文件
     emit_scan_progress(
         &app,
         0,
@@ -2134,9 +2372,9 @@ pub async fn regulation_scan_local_dir<R: tauri::Runtime>(
         None,
     );
 
-    let pdf_files = collect_pdf_files(dir, recursive);
-    let total_found = pdf_files.len();
-    info!("发现 {} 个 PDF 文件", total_found);
+    let source_files = collect_supported_local_files(dir, recursive);
+    let total_found = source_files.len();
+    info!("发现 {} 个受支持文件", total_found);
 
     if total_found == 0 {
         return Ok(ScanResponse {
@@ -2155,10 +2393,10 @@ pub async fn regulation_scan_local_dir<R: tauri::Runtime>(
     // 获取数据库连接 + 加载去重数据
     let (conn, existing_hashes, existing_paths) = open_db_and_load_dedup_data(&app)?;
 
-    // Phase 2: 处理 PDF 文件
-    let (new_files, duplicates, indexed, needs_ocr, failed) = process_pdf_batch(
+    // Phase 2: 处理本地文件
+    let (new_files, duplicates, indexed, needs_ocr, failed) = process_local_file_batch(
         &app,
-        &pdf_files,
+        &source_files,
         &conn,
         &index_state,
         &existing_hashes,
@@ -2235,9 +2473,9 @@ fn enumerate_drives() -> Vec<PathBuf> {
         .collect()
 }
 
-/// 扫描全盘所有 PDF 文件，入库 + 入索引 + 自动 OCR
+/// 扫描全盘所有受支持文件，入库 + 入索引 + 自动 OCR
 ///
-/// 遍历 Windows 所有盘符，对每个盘递归收集 PDF 文件，
+/// 遍历 Windows 所有盘符，对每个盘递归收集受支持文件，
 /// 复用共享的去重/提取/索引/OCR 流程。
 ///
 /// # 参数
@@ -2256,7 +2494,7 @@ pub async fn regulation_scan_all_drives<R: tauri::Runtime>(
         return Err("未发现任何可用盘符".to_string());
     }
 
-    // Phase 1: 从所有盘符收集 PDF 文件
+    // Phase 1: 从所有盘符收集受支持文件
     emit_scan_progress(
         &app,
         0,
@@ -2272,13 +2510,13 @@ pub async fn regulation_scan_all_drives<R: tauri::Runtime>(
         None,
     );
 
-    let mut all_pdf_files = Vec::new();
+    let mut all_source_files = Vec::new();
     for drive in &drives {
         info!("扫描盘符: {}", drive.display());
         emit_scan_progress(
             &app,
             0,
-            all_pdf_files.len(),
+            all_source_files.len(),
             0,
             0,
             0,
@@ -2289,13 +2527,13 @@ pub async fn regulation_scan_all_drives<R: tauri::Runtime>(
             None,
             None,
         );
-        let files = collect_pdf_files(drive, true);
-        info!("盘符 {} 发现 {} 个 PDF", drive.display(), files.len());
-        all_pdf_files.extend(files);
+        let files = collect_supported_local_files(drive, true);
+        info!("盘符 {} 发现 {} 个受支持文件", drive.display(), files.len());
+        all_source_files.extend(files);
     }
 
-    let total_found = all_pdf_files.len();
-    info!("全盘共发现 {} 个 PDF 文件", total_found);
+    let total_found = all_source_files.len();
+    info!("全盘共发现 {} 个受支持文件", total_found);
 
     if total_found == 0 {
         return Ok(ScanResponse {
@@ -2314,12 +2552,12 @@ pub async fn regulation_scan_all_drives<R: tauri::Runtime>(
     // 获取数据库连接 + 加载去重数据
     let (conn, existing_hashes, existing_paths) = open_db_and_load_dedup_data(&app)?;
 
-    // Phase 2: 处理 PDF 文件（全盘扫描使用 RegisterOnly）
+    // Phase 2: 处理受支持文件（全盘扫描使用 RegisterOnly）
     let copy_mode = LocalCopyMode::RegisterOnly;
     let target_dir = resolve_target_dir(&app, None)?;
-    let (new_files, duplicates, indexed, needs_ocr, failed) = process_pdf_batch(
+    let (new_files, duplicates, indexed, needs_ocr, failed) = process_local_file_batch(
         &app,
-        &all_pdf_files,
+        &all_source_files,
         &conn,
         &index_state,
         &existing_hashes,
@@ -2453,7 +2691,7 @@ pub async fn regulation_is_wifi_connected() -> Result<bool, String> {
     }
 }
 
-/// 自动发现本地法规 PDF 文件（轻量级，无 OCR）
+/// 自动发现本地法规文件（轻量级，无 OCR）
 ///
 /// 仅扫描当前局方保存目录下的三类局方法规目录，
 /// 注册到数据库并索引到 Tantivy。
@@ -2479,11 +2717,11 @@ pub async fn regulation_discover_local<R: tauri::Runtime>(
         info!("法规目录不存在，跳过: {}", target_dir.display());
         return Ok(DiscoverLocalResponse { new_added: 0, total_found: 0, duplicates: 0 });
     }
-    let all_pdf_files = collect_pdf_files(&target_dir, true);
-    info!("目录 {} 发现 {} 个 PDF", target_dir.display(), all_pdf_files.len());
+    let all_source_files = collect_supported_local_files(&target_dir, true);
+    info!("目录 {} 发现 {} 个受支持文件", target_dir.display(), all_source_files.len());
 
-    let total_found = all_pdf_files.len();
-    info!("局方法规目录共发现 {} 个 PDF 文件", total_found);
+    let total_found = all_source_files.len();
+    info!("局方法规目录共发现 {} 个受支持文件", total_found);
 
     if total_found == 0 {
         return Ok(DiscoverLocalResponse { new_added: 0, total_found: 0, duplicates: 0 });
@@ -2492,9 +2730,9 @@ pub async fn regulation_discover_local<R: tauri::Runtime>(
     // Phase 2: 注册到数据库并索引（不做 OCR）
     let (conn, existing_hashes, existing_paths) = open_db_and_load_dedup_data(&app)?;
 
-    let (new_files, duplicates, _indexed, _needs_ocr, _failed) = process_pdf_batch(
+    let (new_files, duplicates, _indexed, _needs_ocr, _failed) = process_local_file_batch(
         &app,
-        &all_pdf_files,
+        &all_source_files,
         &conn,
         &index_state,
         &existing_hashes,
@@ -2837,8 +3075,10 @@ pub async fn regulation_ocr_pending<R: tauri::Runtime>(
     app: AppHandle<R>,
     batch_size: Option<usize>,
     index_state: State<'_, RegulationIndexState>,
+    cancel_state: State<'_, RegulationTaskCancelState>,
 ) -> Result<OcrProcessResponse, String> {
     let batch_size = batch_size.unwrap_or(5);
+    reset_cancel_flag(&cancel_state.ocr);
     info!("开始 OCR 处理待提取文件（Rust 原生），批次大小: {}", batch_size);
 
     // 获取需要 OCR 的文件
@@ -2865,9 +3105,26 @@ pub async fn regulation_ocr_pending<R: tauri::Runtime>(
     }
 
     for file in &pending_files {
-        if ocr_single_file_with_online_fallback(&app, &index_state, file, mineru_options.as_ref())
-            .await
-        {
+        if cancel_requested(&cancel_state.ocr) {
+            info!("OCR 队列收到中止请求，停止处理剩余文件");
+            break;
+        }
+
+        let success = ocr_single_file_with_online_fallback(
+            &app,
+            &index_state,
+            file,
+            mineru_options.as_ref(),
+            cancel_state.ocr.clone(),
+        )
+        .await;
+
+        if cancel_requested(&cancel_state.ocr) {
+            info!("OCR 当前文件处理中止: {}", file.title);
+            break;
+        }
+
+        if success {
             ocr_success += 1;
         } else {
             ocr_failed += 1;
@@ -2888,13 +3145,26 @@ pub async fn regulation_ocr_pending<R: tauri::Runtime>(
         }
     }
 
-    let processed = pending_files.len();
+    if cancel_requested(&cancel_state.ocr) {
+        return Err("OCR 已中止".to_string());
+    }
+
+    let processed = ocr_success + ocr_failed + skipped;
     info!(
         "OCR 处理完成: 处理 {}, 成功 {}, 失败 {}, 跳过 {}",
         processed, ocr_success, ocr_failed, skipped
     );
 
     Ok(OcrProcessResponse { processed, ocr_success, ocr_failed, skipped })
+}
+
+/// 请求中止当前 OCR 队列。
+#[tauri::command]
+pub async fn regulation_cancel_ocr(
+    cancel_state: State<'_, RegulationTaskCancelState>,
+) -> Result<bool, String> {
+    cancel_state.ocr.store(true, Ordering::Relaxed);
+    Ok(true)
 }
 
 /// 重试失败的 OCR 文件
@@ -2904,6 +3174,7 @@ pub async fn regulation_ocr_pending<R: tauri::Runtime>(
 pub async fn regulation_retry_failed_ocr<R: tauri::Runtime>(
     app: AppHandle<R>,
     index_state: State<'_, RegulationIndexState>,
+    cancel_state: State<'_, RegulationTaskCancelState>,
 ) -> Result<OcrProcessResponse, String> {
     info!("开始重试失败的 OCR 文件");
 
@@ -2922,7 +3193,7 @@ pub async fn regulation_retry_failed_ocr<R: tauri::Runtime>(
     drop(conn);
 
     // 调用已有的 OCR 处理逻辑
-    regulation_ocr_pending(app, Some(reset_count), index_state).await
+    regulation_ocr_pending(app, Some(reset_count), index_state, cancel_state).await
 }
 
 /// 重置候选记录的响应
@@ -3143,9 +3414,9 @@ pub async fn regulation_requeue_local_ocr_for_mineru<R: tauri::Runtime>(
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CleanupInvalidResponse {
-    /// 候选总数（满足"非 PDF 后缀"或"物理文件不存在"任一条件的记录数）
+    /// 候选总数（满足"不支持的后缀"或"物理文件不存在"任一条件的记录数）
     pub candidate_count: usize,
-    /// 后缀非 .pdf 的记录数
+    /// 后缀不是受支持类型（PDF / TXT）的记录数
     pub non_pdf_count: usize,
     /// 文件物理不存在的记录数
     pub missing_file_count: usize,
@@ -3158,7 +3429,7 @@ pub struct CleanupInvalidResponse {
 }
 
 /// 清理无效的规章记录：
-/// - 文件路径后缀不是 `.pdf`（历史遗留 / 同步流程错误下载到 .txt 等）
+/// - 文件路径后缀不是受支持类型（PDF / TXT）
 /// - 文件物理不存在（磁盘上已被删除）
 ///
 /// 这些记录会一直造成 OCR 失败计数（pdfium FormatError、文件不存在），
@@ -3174,7 +3445,7 @@ pub async fn regulation_cleanup_invalid_files<R: tauri::Runtime>(
 
     let conn = open_regulation_db(&app)?;
 
-    // 1. 全表扫描，按是否 .pdf 后缀 + 物理文件是否存在 两个维度判定
+    // 1. 全表扫描，按是否支持的文件类型 + 物理文件是否存在两个维度判定
     let mut stmt = conn
         .prepare("SELECT id, url, title, file_path FROM regulation_files ORDER BY id ASC")
         .map_err(|e| format!("准备查询语句失败: {}", e))?;
@@ -3201,15 +3472,14 @@ pub async fn regulation_cleanup_invalid_files<R: tauri::Runtime>(
 
     for (id, url, title, file_path) in &rows {
         let path = std::path::Path::new(file_path);
-        let is_pdf = is_pdf_path(path);
+        let is_supported = is_supported_local_scan_path(path);
         let exists = !file_path.is_empty() && path.exists();
 
-        let invalid = !is_pdf || !exists;
-        if !invalid {
+        if !is_invalid_regulation_file_record(path) {
             continue;
         }
 
-        if !is_pdf {
+        if !is_supported {
             non_pdf_count += 1;
         }
         if !exists {
@@ -3225,7 +3495,7 @@ pub async fn regulation_cleanup_invalid_files<R: tauri::Runtime>(
 
     let candidate_count = invalid_ids.len();
     info!(
-        "[CleanupInvalid] 候选 {} 条 (后缀非 PDF: {}, 文件不存在: {})，前几条: {:?}",
+        "[CleanupInvalid] 候选 {} 条 (不支持类型: {}, 文件不存在: {})，前几条: {:?}",
         candidate_count, non_pdf_count, missing_file_count, sample_titles
     );
 
@@ -3273,13 +3543,13 @@ pub async fn regulation_cleanup_invalid_files<R: tauri::Runtime>(
     })
 }
 
-/// 一键对齐 PDF 文件名响应
+/// 一键对齐 PDF/TXT 文件名响应
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RealignFilenamesResponse {
     /// 扫描的 DB 记录总数
     pub total_scanned: usize,
-    /// 因 file_path 为空 / 文件不存在 / 后缀非 .pdf 而跳过的数量
+    /// 因 file_path 为空 / 文件不存在 / 非 PDF/TXT 而跳过的数量
     pub skipped_invalid: usize,
     /// 已经符合规则、无需重命名的数量
     pub already_aligned: usize,
@@ -3295,14 +3565,14 @@ pub struct RealignFilenamesResponse {
     pub failure_samples: Vec<String>,
 }
 
-/// 一键对齐磁盘上的 PDF 文件名为「文号_标题.pdf」格式。
+/// 一键对齐磁盘上的 PDF/TXT 文件名为「文号_标题.ext」格式。
 ///
 /// 历史下载 / 复制流程使用 `<sha256前16字符>.pdf` 作为文件名，导致用户在文件管理器
 /// 里看到一堆不可读的哈希。本命令按现行命名规则（[`build_pretty_filename`]）批量
 /// 重命名磁盘文件，并同步更新数据库 file_path 字段以及 Tantivy 索引。
 ///
 /// 对每条 DB 记录：
-/// 1. 跳过 file_path 为空 / 物理文件不存在 / 后缀非 .pdf 的（让 cleanup 命令处理）
+/// 1. 跳过 file_path 为空 / 物理文件不存在 / 非 PDF 的记录
 /// 2. 算出 desired 文件名，与现有 basename 比较
 /// 3. 如果一致，记入 `already_aligned`
 /// 4. 如果不一致，按 [`dedupe_filename`] 解决冲突后 rename，更新 DB 与索引
@@ -3363,7 +3633,7 @@ pub async fn regulation_realign_pdf_filenames<R: tauri::Runtime>(
             skipped_invalid += 1;
             continue;
         }
-        if !is_pdf_path(path) {
+        if !is_supported_realign_filename_path(path) {
             skipped_invalid += 1;
             continue;
         }
@@ -3823,21 +4093,35 @@ pub async fn regulation_sync_compare_online<R: tauri::Runtime>(
     app: AppHandle<R>,
     doc_type: Option<String>,
     max_pages: Option<usize>,
+    cancel_state: State<'_, RegulationTaskCancelState>,
 ) -> Result<SyncCompareResponse, String> {
     let doc_type = doc_type.unwrap_or_else(|| "all".to_string());
     let max_pages = max_pages.unwrap_or(20);
+    reset_cancel_flag(&cancel_state.sync_compare);
+    let cancel_flag = cancel_state.sync_compare.clone();
 
     let searcher = CaacOnlineSearcher::new().map_err(|e| format!("创建搜索器失败: {}", e))?;
-    let online = match searcher.fetch_all_static(&doc_type).await {
-        Ok(response) => response,
-        Err(e) => {
-            warn!("静态 JSON 源读取失败，回退到局方官网实时爬取: {}", e);
-            searcher
-                .fetch_all(&doc_type, max_pages)
-                .await
-                .map_err(|e| format!("在线抓取失败: {}", e))?
+    let fetch_future = async {
+        match searcher.fetch_all_static(&doc_type).await {
+            Ok(response) => Ok(response),
+            Err(e) => {
+                warn!("静态 JSON 源读取失败，回退到局方官网实时爬取: {}", e);
+                searcher
+                    .fetch_all(&doc_type, max_pages)
+                    .await
+                    .map_err(|e| format!("在线抓取失败: {}", e))
+            }
         }
     };
+
+    let online = tokio::select! {
+        result = fetch_future => result?,
+        _ = wait_for_cancel(cancel_flag.clone()) => return Err("同步已中止".to_string()),
+    };
+
+    if cancel_requested(&cancel_flag) {
+        return Err("同步已中止".to_string());
+    }
 
     let online_docs: Vec<OnlineRegulation> = online
         .documents
@@ -3856,6 +4140,15 @@ pub async fn regulation_sync_compare_online<R: tauri::Runtime>(
         .collect();
 
     regulation_sync_compare(app, online_docs).await
+}
+
+/// 请求中止“同步对比官网”。
+#[tauri::command]
+pub async fn regulation_cancel_sync_compare(
+    cancel_state: State<'_, RegulationTaskCancelState>,
+) -> Result<bool, String> {
+    cancel_state.sync_compare.store(true, Ordering::Relaxed);
+    Ok(true)
 }
 
 #[derive(Debug, Deserialize)]
@@ -4472,17 +4765,26 @@ fn sync_archive_to_desired(
 #[tauri::command]
 pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
     app: AppHandle<R>,
+    cancel_state: State<'_, RegulationTaskCancelState>,
 ) -> Result<FullSyncResponse, String> {
     info!("[FullSync] 开始完整同步从服务器...");
+    reset_cancel_flag(&cancel_state.full_sync);
+    let cancel_flag = cancel_state.full_sync.clone();
 
     // ==================== Stage 1: 拉服务器全量 ====================
     emit_full_sync_progress(&app, "fetching", 0, 0, "正在拉取服务器镜像...");
 
     let searcher = CaacOnlineSearcher::new().map_err(|e| format!("创建搜索器失败: {}", e))?;
-    let online_response = searcher
-        .fetch_all_static("all")
-        .await
-        .map_err(|e| format!("拉服务器镜像失败: {}", e))?;
+    let online_response = tokio::select! {
+        result = searcher.fetch_all_static("all") => {
+            result.map_err(|e| format!("拉服务器镜像失败: {}", e))?
+        }
+        _ = wait_for_cancel(cancel_flag.clone()) => return Err("同步已中止".to_string()),
+    };
+
+    if cancel_requested(&cancel_flag) {
+        return Err("同步已中止".to_string());
+    }
 
     let online_docs: Vec<OnlineRegulation> = online_response
         .documents
@@ -4523,16 +4825,21 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
 
-    let manifest: serde_json::Value = client
-        .get(SERVER_MANIFEST_URL)
-        .send()
-        .await
-        .map_err(|e| format!("拉 manifest 失败: {}", e))?
-        .error_for_status()
-        .map_err(|e| format!("manifest HTTP 错误: {}", e))?
-        .json()
-        .await
-        .map_err(|e| format!("解析 manifest 失败: {}", e))?;
+    let manifest: serde_json::Value = tokio::select! {
+        result = async {
+            client
+                .get(SERVER_MANIFEST_URL)
+                .send()
+                .await
+                .map_err(|e| format!("拉 manifest 失败: {}", e))?
+                .error_for_status()
+                .map_err(|e| format!("manifest HTTP 错误: {}", e))?
+                .json()
+                .await
+                .map_err(|e| format!("解析 manifest 失败: {}", e))
+        } => result?,
+        _ = wait_for_cancel(cancel_flag.clone()) => return Err("同步已中止".to_string()),
+    };
     let server_last_updated = manifest
         .get("lastUpdated")
         .and_then(|v| v.as_str())
@@ -4553,6 +4860,10 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
     let mut meta_updated = 0usize;
 
     for (i, doc) in online_docs.iter().enumerate() {
+        if cancel_requested(&cancel_flag) {
+            return Err("同步已中止".to_string());
+        }
+
         if i % 200 == 0 {
             emit_full_sync_progress(
                 &app,
@@ -4586,6 +4897,10 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
     // 标记未匹配 + 未标 validity 的记录（按 title 前缀推断）
     let mut obsolete_marked = 0usize;
     for (url, meta) in &local_data {
+        if cancel_requested(&cancel_flag) {
+            return Err("同步已中止".to_string());
+        }
+
         if matched_urls.contains(url) {
             continue;
         }
@@ -4632,6 +4947,10 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
     let mut download_skipped_no_url = 0usize;
 
     for (i, doc) in missing_docs.iter().enumerate() {
+        if cancel_requested(&cancel_flag) {
+            return Err("同步已中止".to_string());
+        }
+
         let preview: String = doc.title.chars().take(30).collect();
         emit_full_sync_progress(
             &app,
@@ -4666,6 +4985,9 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
             match download_and_save_pdf(&client, &pdf_url, &target).await {
                 Ok(size) => size as i64,
                 Err(e) => {
+                    if cancel_requested(&cancel_flag) {
+                        return Err("同步已中止".to_string());
+                    }
                     warn!("下载失败 {}: {}", doc.title, e);
                     download_failed += 1;
                     continue;
@@ -4690,6 +5012,10 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
     );
 
     // ==================== Stage 4: 归档同步 ====================
+    if cancel_requested(&cancel_flag) {
+        return Err("同步已中止".to_string());
+    }
+
     emit_full_sync_progress(&app, "archive", 0, 0, "同步归档目录...");
     let archive_stats = sync_archive_to_desired(&conn, &local_root)?;
     emit_full_sync_progress(
@@ -4760,10 +5086,24 @@ pub async fn regulation_full_sync_from_server<R: tauri::Runtime>(
     })
 }
 
+/// 请求中止“应用内完整同步”。
+#[tauri::command]
+pub async fn regulation_cancel_full_sync(
+    cancel_state: State<'_, RegulationTaskCancelState>,
+) -> Result<bool, String> {
+    cancel_state.full_sync.store(true, Ordering::Relaxed);
+    Ok(true)
+}
+
 #[cfg(test)]
 mod is_pdf_path_tests {
     use super::is_pdf_path;
+    use super::{
+        is_invalid_regulation_file_record, is_supported_local_scan_path, load_local_text_content,
+        is_supported_realign_filename_path,
+    };
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     #[test]
     fn accepts_lowercase_pdf() {
@@ -4804,5 +5144,55 @@ mod is_pdf_path_tests {
         // 实际数据里出现过的形态：标题里有句号或括号
         assert!(!is_pdf_path(&PathBuf::from(r"D:\docs\民航法规.txt")));
         assert!(is_pdf_path(&PathBuf::from(r"D:\docs\民航法规.pdf")));
+    }
+
+    #[test]
+    fn accepts_txt_as_supported_local_scan_source() {
+        assert!(is_supported_local_scan_path(&PathBuf::from(r"D:\docs\规章摘要.txt")));
+        assert!(is_supported_local_scan_path(&PathBuf::from(r"D:\docs\规章摘要.TXT")));
+        assert!(is_supported_local_scan_path(&PathBuf::from(r"D:\docs\规章摘要.pdf")));
+        assert!(!is_supported_local_scan_path(&PathBuf::from(r"D:\docs\规章摘要.docx")));
+    }
+
+    #[test]
+    fn accepts_txt_and_pdf_as_realign_filename_targets() {
+        assert!(is_supported_realign_filename_path(&PathBuf::from(r"D:\docs\规章摘要.txt")));
+        assert!(is_supported_realign_filename_path(&PathBuf::from(r"D:\docs\规章摘要.TXT")));
+        assert!(is_supported_realign_filename_path(&PathBuf::from(r"D:\docs\规章摘要.pdf")));
+        assert!(!is_supported_realign_filename_path(&PathBuf::from(r"D:\docs\规章摘要.docx")));
+    }
+
+    #[test]
+    fn loads_local_text_content_for_txt_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let txt_path = temp_dir.path().join("regulation.txt");
+        std::fs::write(&txt_path, "检查员 岗位职责\n局方要求").unwrap();
+
+        let content = load_local_text_content(&txt_path).unwrap();
+
+        assert!(content.contains("检查员"));
+        assert!(content.contains("局方要求"));
+    }
+
+    #[test]
+    fn loads_gbk_encoded_local_text_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let txt_path = temp_dir.path().join("regulation-gbk.txt");
+        let (gbk_bytes, _, _) = encoding_rs::GBK.encode("检查员 岗位职责\n局方要求");
+        std::fs::write(&txt_path, gbk_bytes.as_ref()).unwrap();
+
+        let content = load_local_text_content(&txt_path).unwrap();
+
+        assert!(content.contains("检查员"));
+        assert!(content.contains("局方要求"));
+    }
+
+    #[test]
+    fn cleanup_keeps_existing_txt_records() {
+        let temp_dir = TempDir::new().unwrap();
+        let txt_path = temp_dir.path().join("regulation.txt");
+        std::fs::write(&txt_path, "检查员 岗位职责\n局方要求").unwrap();
+
+        assert!(!is_invalid_regulation_file_record(&txt_path));
     }
 }

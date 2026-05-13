@@ -651,12 +651,13 @@ dependencies = [
 
 [[package]]
 name = "ccar-copilot"
-version = "0.1.7"
+version = "0.1.10"
 dependencies = [
  "bincode",
  "chrono",
  "crossbeam",
  "dirs",
+ "encoding_rs",
  "futures",
  "image",
  "infer 0.16.0",

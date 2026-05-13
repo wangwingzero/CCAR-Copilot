@@ -1,43 +1,19 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-
-- `src/`: Vue 3 + TypeScript frontend views, components, composables, stores, services, and locales.
-- `src-tauri/`: Tauri 2 Rust backend for commands, desktop integration, OCR, hotkeys, screenshots, and window logic.
-- `src-tauri/file-search-service/`: standalone Rust sidecar service for file search.
-- `public/`: static assets served by Vite.
-- `resources/`: application resources and packaging icons.
-- `test-fixtures/`: deterministic payloads, images, and shared test data.
-- `docs/`: documentation, migration notes, and troubleshooting material.
+`src/` contains the Vue 3 frontend: UI components in `src/components/`, shared state in `src/stores/`, composables in `src/composables/`, and shared types in `src/types/`. Desktop and native logic lives in `src-tauri/`; use `src-tauri/src/commands/` for Tauri IPC, `src-tauri/src/regulation/` for regulation indexing/search, `src-tauri/src/ocr/` for OCR, and `src-tauri/src/database/` for persistence. Static assets live under `public/` and `resources/`. Test inputs and golden data live in `test-fixtures/`. Cloudflare update delivery code is isolated in `workers/ccar-update/`.
 
 ## Build, Test, and Development Commands
-
-- `npm run dev`: start the Vite frontend dev server only.
-- `npm run tauri:dev`: run the full desktop app with frontend and Rust backend.
-- `npm run build`: run `vue-tsc --noEmit` and build the frontend bundle.
-- `npm run lint`: lint frontend source under `src/`; use `npm run lint:fix` for safe fixes.
-- `npm run type-check`: run Vue and TypeScript type checking.
-- `npm run test`: run Vitest in watch mode.
-- `npm run test:run`: run Vitest once in CI style.
-- `npm run test:coverage`: run Vitest with coverage output.
-- `cd src-tauri && cargo test`: run Rust tests for the Tauri backend.
+Run `npm install` once at the repo root. Use `npm run dev` for the frontend only and `npm run tauri:dev` for the Windows desktop app. Build the web bundle with `npm run build`; type-check only with `npm run type-check`. Lint with `npm run lint` or auto-fix with `npm run lint:fix`. Run frontend tests with `npm run test:run` and coverage with `npm run test:coverage`. For Rust checks, use `cd src-tauri; cargo test` and `cargo test --features proptest` when touching property-tested code. For the update worker, use `cd workers/ccar-update; npm run dev` or `npm run deploy`.
 
 ## Coding Style & Naming Conventions
-
-Formatting is controlled by `.editorconfig` and Prettier. Use UTF-8, LF endings, and final newlines. TypeScript, Vue, JavaScript, JSON, TOML, CSS, and HTML use 2 spaces; Rust and Python use 4 spaces. Markdown may keep trailing spaces for line breaks.
-
-Prettier uses single quotes, no semicolons, ES5 trailing commas, and a 100 character print width. Vue SFC blocks must be ordered `script`, `template`, `style`.
-
-Use `PascalCase.vue` for Vue components, `useXxx.ts` for composables, camelCase domain names for stores such as `fileSearch.ts`, and `snake_case` for Rust modules and files.
+Follow `.editorconfig`: 2 spaces for Vue/TS/JS/JSON, 4 spaces for Rust and Python, LF endings, UTF-8. Prettier enforces single quotes, no semicolons, trailing commas (`es5`), and `printWidth: 100`. ESLint covers `src/` and warns on unused vars unless prefixed with `_`. Use PascalCase for Vue component files (`SettingsPanel.vue`), camelCase for composables/utilities (`useTheme.ts`, `sanitize.ts`), and snake_case for Rust modules (`update_cmd.rs`).
 
 ## Testing Guidelines
-
-Frontend tests use Vitest, Vue Test Utils, and `jsdom`; Vitest includes `src/**/*.{test,spec}.{js,ts}`. Place tests close to feature code, for example `src/components/**/__tests__/`. Property tests use `*.property.spec.ts`. Store complex deterministic inputs in `test-fixtures/`.
-
-Run `npm run test:run` for frontend changes and `cd src-tauri && cargo test` for Rust changes. Use coverage when changing shared behavior.
+Vitest is the frontend test runner; place specs near the feature in `__tests__/` and prefer `*.spec.ts` or `*.property.spec.ts` for property-based cases. Reuse fixtures from `test-fixtures/` instead of embedding large payloads inline. Add or update Rust tests when changing command, OCR, indexing, or database behavior, especially in modules that already have `proptest-regressions/` coverage.
 
 ## Commit & Pull Request Guidelines
+Recent history follows Conventional Commits such as `feat(regulation): ...`, `refactor(ocr): ...`, and `chore: ...`. Keep subjects imperative and scoped when useful. PRs should explain the user-facing change, list affected areas (`src/`, `src-tauri/`, worker, docs), and include screenshots or short recordings for UI updates. Link related issues, mention new config or model assets, and paste the verification commands you ran.
 
-Recent history follows Conventional Commits, including `refactor:`, `fix:`, and `chore:`. Keep commits scoped and atomic; separate frontend and Rust refactors when practical.
-
-Pull requests should include a clear summary, rationale, linked issue or task ID, test evidence with commands and results, and screenshots or GIFs for UI changes. Mention skipped checks and why they were not run.
+## Configuration Notes
+This repository is Windows-first. When changing dev-server ports, update both `vite.config.ts` and `src-tauri/tauri.conf.json`; `tauri:dev` fails if those drift.

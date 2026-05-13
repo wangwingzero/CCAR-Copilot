@@ -58,6 +58,10 @@ export interface UpdateInfo {
   date: string | null
   /** 下载大小（字节） */
   downloadSize: number | null
+  /** 最新安装包下载地址 */
+  downloadUrl?: string | null
+  /** Rust snake_case 兼容字段 */
+  download_url?: string | null
 }
 
 /**
@@ -162,6 +166,7 @@ const config = ref<RustUpdateConfig>({
 })
 const isLoading = ref(false)
 const error = ref<string | null>(null)
+const latestDownloadUrl = ref<string | null>(null)
 
 // 下载字节累计与总大小(供 UI 展示)
 const downloadedBytes = ref(0)
@@ -174,9 +179,9 @@ let lastBytesSampledAt = 0
 
 // 上次失败的动作(供「重试」按钮使用)
 let lastFailedAction: 'check' | 'download' | null = null
+let downloadPromise: Promise<UpdateStatus> | null = null
 
 // 单例资源,初始化一次后不释放,直到应用退出
-let checkInterval: ReturnType<typeof setInterval> | null = null
 const unlisteners: UnlistenFn[] = []
 let initPromise: Promise<void> | null = null
 
@@ -261,9 +266,6 @@ export function useUpdate() {
     try {
       await invoke('set_update_config', { config: newConfig })
       config.value = newConfig
-
-      // 重新设置定时检查
-      setupAutoCheck()
     } catch (e) {
       console.error('保存更新配置失败:', e)
       error.value = String(e)
@@ -293,7 +295,7 @@ export function useUpdate() {
       if (result.status === 'Available' && result.info) {
         const skipped = getSettingsStore().update.skipVersion
         if (skipped && skipped === result.info.version) {
-          console.info('[useUpdate] 跳过用户已忽略的版本:', skipped)
+          console.warn('[useUpdate] 跳过用户已忽略的版本:', skipped)
           status.value = { status: 'UpToDate' }
           lastFailedAction = null
           return status.value
@@ -326,6 +328,10 @@ export function useUpdate() {
    * @returns 更新状态
    */
   async function downloadAndInstall(): Promise<UpdateStatus> {
+    if (downloadPromise) {
+      return downloadPromise
+    }
+
     isLoading.value = true
     error.value = null
     downloadedBytes.value = 0
@@ -335,24 +341,49 @@ export function useUpdate() {
     lastBytesSampledAt = 0
     status.value = { status: 'Downloading', progress: 0 }
 
-    try {
-      const result = await invoke<UpdateStatus>('download_and_install_update')
-      status.value = result
-      lastFailedAction = null
+    downloadPromise = (async () => {
+      try {
+        const result = await invoke<UpdateStatus>('download_and_install_update')
+        status.value = result
+        lastFailedAction = null
 
-      // 注意：不在这里自动触发重启。下载并安装完成后状态切到 PendingRestart，
-      // UI 显示「立即重启」按钮，由用户主动点击调用 restartApp() 完成升级。
+        // 注意：不在这里自动触发重启。下载并安装完成后状态切到 PendingRestart，
+        // UI 显示「立即重启」按钮，由用户主动点击调用 restartApp() 完成升级。
 
-      return result
-    } catch (e) {
-      console.error('下载更新失败:', e)
-      error.value = String(e)
-      status.value = { status: 'Error', message: String(e) }
-      lastFailedAction = 'download'
-      return status.value
-    } finally {
-      isLoading.value = false
+        return result
+      } catch (e) {
+        const message = String(e)
+        if (message.includes('已有更新下载任务正在进行')) {
+          return status.value
+        }
+
+        console.error('下载更新失败:', e)
+        error.value = message
+        status.value = { status: 'Error', message }
+        lastFailedAction = 'download'
+        return status.value
+      } finally {
+        downloadPromise = null
+        isLoading.value = false
+      }
+    })()
+
+    return downloadPromise
+  }
+
+  /**
+   * 获取最新版 Windows 安装包地址,供用户手动用浏览器下载安装。
+   */
+  async function getLatestUpdateDownloadUrl(): Promise<string> {
+    const urlFromCurrentCheck = updateInfo.value?.downloadUrl ?? updateInfo.value?.download_url
+    if (urlFromCurrentCheck) {
+      latestDownloadUrl.value = urlFromCurrentCheck
+      return urlFromCurrentCheck
     }
+
+    const url = await invoke<string>('get_latest_update_download_url')
+    latestDownloadUrl.value = url
+    return url
   }
 
   /**
@@ -386,7 +417,7 @@ export function useUpdate() {
     const v = updateInfo.value?.version
     if (v) {
       getSettingsStore().updateUpdate({ skipVersion: v })
-      console.info('[useUpdate] 用户跳过版本:', v)
+      console.warn('[useUpdate] 用户跳过版本:', v)
     }
     status.value = { status: 'Idle' }
   }
@@ -405,25 +436,6 @@ export function useUpdate() {
       await downloadAndInstall()
     } else {
       await checkForUpdate()
-    }
-  }
-
-  /**
-   * 设置自动检查更新
-   */
-  function setupAutoCheck(): void {
-    // 清除现有的定时器
-    if (checkInterval) {
-      clearInterval(checkInterval)
-      checkInterval = null
-    }
-
-    // 如果启用了自动更新，设置定时检查
-    if (config.value.auto_update_enabled && config.value.check_interval_hours > 0) {
-      const intervalMs = config.value.check_interval_hours * 60 * 60 * 1000
-      checkInterval = setInterval(() => {
-        checkForUpdate()
-      }, intervalMs)
     }
   }
 
@@ -485,7 +497,7 @@ export function useUpdate() {
       // 托盘菜单「检查更新」入口: Rust 端 emit 'tray-check-update' 时静默触发
       // 一次检查; 若发现新版本,上面 watch(status) 会弹 toast 引导用户进设置
       const trayCheck = await listen('tray-check-update', () => {
-        console.info('[useUpdate] 收到托盘「检查更新」事件')
+        console.warn('[useUpdate] 收到托盘「检查更新」事件')
         void checkForUpdate()
       })
       unlisteners.push(started, progress, finished, trayCheck)
@@ -509,9 +521,8 @@ export function useUpdate() {
       await fetchCurrentVersion()
       await fetchConfig()
       await setupEventListeners()
-      setupAutoCheck()
 
-      // 如果配置了启动时检查,延迟几秒再检查,避免影响启动速度
+      // 只在启动时检查一次,不再做周期轮询,避免后台重复打扰用户。
       if (config.value.check_on_startup && config.value.auto_update_enabled) {
         setTimeout(() => {
           void checkForUpdate()
@@ -542,6 +553,7 @@ export function useUpdate() {
     downloadedBytes,
     totalBytes,
     downloadSpeed,
+    latestDownloadUrl,
 
     // 计算属性
     isUpdateAvailable,
@@ -559,6 +571,7 @@ export function useUpdate() {
     dismissUpdate,
     skipCurrentVersion,
     retryLastAction,
+    getLatestUpdateDownloadUrl,
     saveConfig,
     fetchConfig,
     fetchCurrentVersion,

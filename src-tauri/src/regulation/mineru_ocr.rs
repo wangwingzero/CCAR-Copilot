@@ -5,6 +5,8 @@
 
 use std::io::{Cursor, Read};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reqwest::Client;
@@ -68,6 +70,23 @@ pub async fn ocr_pdf_to_markdown(
     pdf_path: &Path,
     options: &MineruOcrOptions,
 ) -> Result<String, String> {
+    ocr_pdf_to_markdown_with_cancel(
+        pdf_path,
+        options,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+}
+
+pub async fn ocr_pdf_to_markdown_with_cancel(
+    pdf_path: &Path,
+    options: &MineruOcrOptions,
+    cancel_flag: Arc<AtomicBool>,
+) -> Result<String, String> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err("OCR 已中止".to_string());
+    }
+
     let metadata =
         tokio::fs::metadata(pdf_path).await.map_err(|e| format!("读取 PDF 信息失败: {}", e))?;
     if metadata.len() > MINERU_MAX_FILE_BYTES {
@@ -84,8 +103,17 @@ pub async fn ocr_pdf_to_markdown(
         .map_err(|e| format!("创建 MinerU HTTP 客户端失败: {}", e))?;
 
     let (upload_url, batch_id) = request_upload_url(&client, pdf_path, options).await?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err("OCR 已中止".to_string());
+    }
     upload_pdf(&client, pdf_path, &upload_url).await?;
-    let result_url = poll_result_url(&client, &batch_id, options).await?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err("OCR 已中止".to_string());
+    }
+    let result_url = poll_result_url(&client, &batch_id, options, cancel_flag.clone()).await?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err("OCR 已中止".to_string());
+    }
     download_full_markdown(&client, &result_url).await
 }
 
@@ -179,11 +207,16 @@ async fn poll_result_url(
     client: &Client,
     batch_id: &str,
     options: &MineruOcrOptions,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_secs(options.timeout_seconds.max(60));
     let mut wait_seconds = 2;
 
     while Instant::now() < deadline {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err("OCR 已中止".to_string());
+        }
+
         let response = client
             .get(format!("{}/api/v4/extract-results/batch/{}", MINERU_API_BASE, batch_id))
             .bearer_auth(options.api_key.trim())
@@ -218,7 +251,14 @@ async fn poll_result_url(
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(wait_seconds)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(wait_seconds)) => {}
+            _ = async {
+                while !cancel_flag.load(Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+            } => return Err("OCR 已中止".to_string()),
+        }
         wait_seconds = (wait_seconds * 2).min(30);
     }
 

@@ -138,9 +138,9 @@ export const useRegulationStore = defineStore('regulation', () => {
   }
 
   /**
-   * 开始全盘扫描所有 PDF 文件
+   * 开始全盘扫描所有 PDF / TXT 文件
    *
-   * 遍历 Windows 所有盘符，递归收集 PDF 并入库索引。
+   * 遍历 Windows 所有盘符，递归收集 PDF / TXT 并入库索引。
    */
   async function startFullScan(
     initIndexFn?: () => Promise<void>,
