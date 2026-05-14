@@ -26,6 +26,7 @@ import {
   saveScanFolders,
 } from './scanFolders'
 import { resolveResultSnippet } from './resultSnippets'
+import { buildSearchFeedback } from './searchFeedback'
 
 const appWindow = getCurrentWindow()
 const isMaximized = ref(false)
@@ -479,12 +480,20 @@ const processPendingButtonLabel = computed(() => {
   return '处理待索引/OCR'
 })
 
-// 搜索性能提示
-const searchPerformanceHint = computed(() => {
-  if (lastSearchSource.value === 'local' && localSearchElapsedMs.value > 0) {
-    return `本地搜索 ${localSearchElapsedMs.value}ms`
-  }
-  return null
+const indexedSearchScope = computed(() => dbSyncStatus.value?.indexed ?? localDocCount.value)
+const pendingOcrCount = computed(() => dbSyncStatus.value?.pending_ocr ?? 0)
+const searchFeedback = computed(() => {
+  return buildSearchFeedback({
+    elapsedMs: lastSearchSource.value === 'local' ? localSearchElapsedMs.value : null,
+    hasSearched: hasSearched.value,
+    indexedCount: indexedSearchScope.value,
+    isLoading: isLoading.value,
+    isLocalSearching: isLocalSearching.value,
+    keyword: lastSearchKeyword.value,
+    pendingOcr: pendingOcrCount.value,
+    resultCount: totalCount.value,
+    source: lastSearchSource.value,
+  })
 })
 
 // 初始化本地索引 + 自动发现
@@ -665,10 +674,8 @@ async function handleSearch(): Promise<void> {
   switch (searchMode.value) {
     case 'local': {
       // 仅本地搜索
-      const localResults = await searchLocal(searchOptions)
-      if (localResults.length > 0) {
-        lastSearchSource.value = 'local'
-      }
+      await searchLocal(searchOptions)
+      lastSearchSource.value = 'local'
       break
     }
     case 'online':
@@ -1632,7 +1639,7 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
           aria-label="规章搜索关键词"
           @keydown.enter="handleSearch"
         />
-        <button class="search-btn" :disabled="!canSearch" @click="handleSearch">
+        <button class="search-btn" :disabled="!canSearch || isLocalSearching" @click="handleSearch">
           <template v-if="isInitializing">
             <span class="btn-spinner"></span>
             启动服务中...
@@ -1667,8 +1674,14 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
         <div v-if="isLocalIndexReady" class="local-index-info">
           <span class="index-status-dot" title="本地索引已就绪"></span>
           <span class="index-status-text">本地索引就绪</span>
-          <span v-if="searchPerformanceHint" class="perf-hint">{{ searchPerformanceHint }}</span>
         </div>
+      </div>
+
+      <div v-if="searchFeedback" class="search-feedback" role="status" aria-live="polite">
+        <span class="search-feedback-summary">{{ searchFeedback.summary }}</span>
+        <span v-if="searchFeedback.hint" class="search-feedback-hint">
+          {{ searchFeedback.hint }}
+        </span>
       </div>
 
       <!-- 主操作区(常用) -->
@@ -2081,9 +2094,9 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
         <span>正在启动规章查询服务...</span>
       </div>
 
-      <div v-else-if="isLoading" class="loading">
+      <div v-else-if="isLoading || isLocalSearching" class="loading">
         <div class="spinner"></div>
-        <span>正在搜索...</span>
+        <span>{{ isLocalSearching ? '正在本地搜索...' : '正在搜索...' }}</span>
       </div>
 
       <div v-else-if="!hasResults && !error" class="empty-state">
@@ -2825,9 +2838,23 @@ async function handleValidityClick(validity: RegulationValidity): Promise<void> 
   font-size: 12px;
 }
 
-.perf-hint {
+.search-feedback {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -2px 0 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.search-feedback-summary {
   color: #52c41a;
   font-weight: 500;
+}
+
+.search-feedback-hint {
+  color: var(--text-secondary, #999);
 }
 
 .scan-add-btn,

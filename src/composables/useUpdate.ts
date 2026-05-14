@@ -180,6 +180,7 @@ let lastBytesSampledAt = 0
 // 上次失败的动作(供「重试」按钮使用)
 let lastFailedAction: 'check' | 'download' | null = null
 let downloadPromise: Promise<UpdateStatus> | null = null
+let checkRequestSeq = 0
 
 // 单例资源,初始化一次后不释放,直到应用退出
 const unlisteners: UnlistenFn[] = []
@@ -205,6 +206,10 @@ const downloadEtaSeconds = computed<number | null>(() => {
   if (remaining <= 0) return 0
   return Math.ceil(remaining / downloadSpeed.value)
 })
+
+function isUpdateFlowActive(s: UpdateStatusType): boolean {
+  return s === 'Downloading' || s === 'Ready' || s === 'Installing' || s === 'PendingRestart'
+}
 
 // ============================================
 // 状态变化时弹 Toast(模块级 watch,永久生效)
@@ -287,9 +292,14 @@ export function useUpdate() {
     isLoading.value = true
     error.value = null
     status.value = { status: 'Checking' }
+    const requestSeq = ++checkRequestSeq
 
     try {
       const result = await invoke<UpdateStatus>('check_for_update')
+
+      if (requestSeq !== checkRequestSeq || isUpdateFlowActive(status.value.status)) {
+        return status.value
+      }
 
       // 用户跳过的版本不再显示「发现新版本」卡片,视觉上当成 UpToDate 处理
       if (result.status === 'Available' && result.info) {
@@ -313,6 +323,9 @@ export function useUpdate() {
       return result
     } catch (e) {
       console.error('检查更新失败:', e)
+      if (requestSeq !== checkRequestSeq || isUpdateFlowActive(status.value.status)) {
+        return status.value
+      }
       error.value = String(e)
       status.value = { status: 'Error', message: String(e) }
       lastFailedAction = 'check'
@@ -339,6 +352,7 @@ export function useUpdate() {
     downloadSpeed.value = 0
     lastBytesSampled = 0
     lastBytesSampledAt = 0
+    checkRequestSeq += 1
     status.value = { status: 'Downloading', progress: 0 }
 
     downloadPromise = (async () => {

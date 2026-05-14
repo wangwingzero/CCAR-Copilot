@@ -1,6 +1,6 @@
 [package]
 name = "ccar-copilot"
-version = "0.1.11"
+version = "0.1.13"
 description = "CCAR Copilot - 民航规章检索与同步工具"
 authors = ["wangh"]
 edition = "2021"

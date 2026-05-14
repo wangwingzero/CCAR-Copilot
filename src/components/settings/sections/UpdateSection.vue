@@ -11,7 +11,7 @@
  * 2. 更新动作和状态:
  *    - 调用 `useUpdate()` composable 的 `checkForUpdate / downloadAndInstall /
  *      restartApp`
- *    - 显示当前版本、发现的新版本、下载进度、发布说明和重启提示
+ *    - 显示当前版本、发现的新版本、下载进度和重启提示
  */
 
 import { computed, ref } from 'vue'
@@ -47,7 +47,6 @@ const {
   checkForUpdate,
   downloadAndInstall,
   restartApp,
-  skipCurrentVersion,
   retryLastAction,
   getLatestUpdateDownloadUrl,
 } = useUpdate()
@@ -70,13 +69,6 @@ const formatLastCheckTime = computed(() => {
   } catch {
     return updateConfig.value.lastCheckTime
   }
-})
-
-const formatReleaseDate = computed(() => {
-  const raw = updateInfo.value?.date
-  if (!raw) return ''
-  const d = new Date(raw)
-  return Number.isNaN(d.getTime()) ? raw : d.toLocaleString()
 })
 
 /** 是否展示更新状态卡片(Idle 且无错误时隐藏,避免多余 UI) */
@@ -171,11 +163,6 @@ async function handleOpenLatestInstaller(): Promise<void> {
 async function handleRetry(): Promise<void> {
   await retryLastAction()
 }
-
-/** 「跳过此版本」按钮: 持久化不再提示该版本 */
-function handleSkipVersion(): void {
-  skipCurrentVersion()
-}
 </script>
 
 <template>
@@ -260,10 +247,6 @@ function handleSkipVersion(): void {
               })
             }}
           </div>
-          <div v-if="formatReleaseDate" class="status-meta">
-            {{ $t('settings.update.releaseDate') }}: {{ formatReleaseDate }}
-          </div>
-          <pre v-if="updateInfo.notes" class="release-notes">{{ updateInfo.notes }}</pre>
           <div class="status-actions">
             <button
               class="primary-btn"
@@ -271,9 +254,6 @@ function handleSkipVersion(): void {
               @click="handleDownloadAndInstall"
             >
               {{ $t('settings.update.downloadAndInstall') }}
-            </button>
-            <button class="secondary-btn" @click="handleSkipVersion">
-              {{ $t('settings.update.skipThisVersion') }}
             </button>
           </div>
         </template>
@@ -411,20 +391,6 @@ function handleSkipVersion(): void {
   font-variant-numeric: tabular-nums;
 }
 
-.release-notes {
-  margin: 0;
-  padding: 8px 10px;
-  background: var(--color-input-bg, rgba(118, 118, 128, 0.24));
-  border-radius: var(--radius-sm, 6px);
-  color: var(--color-text-primary, #fff);
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 180px;
-  overflow: auto;
-}
-
 .status-actions {
   display: flex;
   gap: 8px;
@@ -482,27 +448,6 @@ function handleSkipVersion(): void {
 
 .status-eta {
   /* 剩余时间与速度同行显示，表示同一个“实时下载详情”信息家族 */
-}
-
-.secondary-btn {
-  padding: 6px 16px;
-  border: 1px solid var(--color-border, #38383a);
-  border-radius: var(--radius-sm, 6px);
-  background: transparent;
-  color: var(--color-text-secondary, #ebebf599);
-  font-size: 13px;
-  cursor: pointer;
-  transition: color var(--transition-fast, 0.15s), border-color var(--transition-fast, 0.15s);
-}
-
-.secondary-btn:hover:not(:disabled) {
-  color: var(--color-text-primary, #fff);
-  border-color: var(--color-text-secondary, #ebebf599);
-}
-
-.secondary-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .manual-download-btn {
